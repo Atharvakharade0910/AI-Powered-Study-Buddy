@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Document Study · Study Buddy</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <style>
+    .rag-page{max-width:1680px;margin:0 auto;padding:58px 30px 90px}
+    .rag-head{margin-bottom:34px}.rag-head .eyebrow{display:inline-flex;align-items:center;min-height:52px;padding:14px 22px;border:1px solid #4b65bd;border-radius:999px;background:linear-gradient(105deg,#173567,#43205d);box-shadow:0 12px 28px #101d5544;color:#8feaff;font-size:18px;letter-spacing:.16em}.rag-head h1{margin:18px 0 12px;font-size:clamp(42px,5vw,70px)}.rag-head p{max-width:720px}
+    body.dashboard .rag-layout{display:grid;grid-template-columns:340px minmax(0,1fr);gap:28px;align-items:start}
+    .rag-library,.rag-chat{background:linear-gradient(145deg,#141735e8,#0c0e1de8);border:1px solid #303566;border-radius:28px;padding:30px;box-shadow:0 20px 70px #0004;min-height:720px}
+    .rag-library{position:sticky;top:25px;overflow:auto}.rag-library h2,.rag-chat h2{font-size:30px;letter-spacing:-.05em;margin:12px 0}
+    .rag-library p{color:#aeb7d5;font-size:13px;line-height:1.7}.upload-zone{border:1px dashed #5364b3;border-radius:18px;padding:18px;background:#101633;margin:22px 0}.upload-zone input{font-size:11px;padding:12px}.upload-zone button{width:100%;margin-top:12px;padding:13px}.upload-status{display:block;color:#72edc3;font-size:11px;line-height:1.5;margin-top:12px}.doc-list{margin-top:25px}.doc-item{border-top:1px solid var(--line);padding:14px 0;color:#c0c7e0;font-size:12px;display:flex;gap:10px}.doc-item:before{content:'PDF';font:9px 'DM Mono',monospace;color:#ff86ca;border:1px solid #9b5484;border-radius:5px;padding:4px}.doc-item small{display:block;color:#7c87aa;margin-top:4px}.rag-callout{border:1px solid #3d74bc;border-radius:16px;padding:15px;margin-top:24px;background:linear-gradient(135deg,#102e55,#281847);color:#bac8eb;font-size:11px;line-height:1.6}.rag-callout b{color:#7deec7}
+    .rag-chat h2{margin-bottom:8px}.rag-chat .subhead{color:#909bbe;font-size:12px;margin:0 0 22px}.rag-messages{height:620px;overflow:auto;background:#070915cc;border-radius:20px;padding:24px;display:grid;align-content:start;gap:13px}.rag-messages .bubble{max-width:80%;padding:14px 17px}.rag-form{display:flex;gap:12px;margin-top:16px}.rag-form input{flex:1}.rag-form button{padding:0 24px}.rag-tip{color:#7f8bad;font-size:11px;margin-top:17px}.rag-tip b{color:var(--cyan)}
+    .quiz-panel{background:linear-gradient(145deg,#17183de8,#0c1024e8)}.quiz-panel .label{display:block}.quiz-panel>p{font-size:12px;margin-bottom:18px}.quiz-panel button{width:100%;padding:13px}.quiz-question{border-top:1px solid var(--line);padding:16px 0}.quiz-question strong{display:block;color:#edf0ff;font-size:13px;line-height:1.5}.quiz-option{display:flex;gap:8px;align-items:flex-start;margin-top:10px;color:#b9c2df;font-size:12px;font-weight:400}.quiz-option input{width:auto;margin-top:2px;padding:0}.quiz-actions{margin-top:14px}.quiz-result{color:#72edc3;font:11px 'DM Mono',monospace;line-height:1.5;margin-top:14px}.quiz-panel .subtle{font-size:11px}.quiz-panel .secondary-action{display:none}
+    .prompt-chips{display:flex;gap:9px;flex-wrap:wrap;margin:0 0 18px}.prompt-chips button{background:#161d40;border:1px solid #38477d;box-shadow:none;padding:10px 13px;font-size:11px}.prompt-chips button:hover{border-color:var(--cyan);transform:translateY(-2px)}.empty-chat{min-height:220px;display:grid;place-items:center;align-content:center;gap:8px;text-align:center;color:#9da8ca}.empty-chat strong{font-size:18px;color:#f4f5ff}.empty-chat span{font-size:12px}.empty-orb{width:54px;height:54px;display:grid;place-items:center;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--magenta));color:#fff;font-size:24px;box-shadow:0 0 32px #855dff66;margin-bottom:6px}.rag-status{min-height:18px;color:#72edc3;font:11px 'DM Mono',monospace;margin-top:10px}.prompt-chips button:disabled,.rag-form button:disabled,.upload-zone button:disabled{opacity:.6;cursor:wait}.quiz-card{margin-top:18px;padding:20px;border:1px solid #4659a4;border-radius:18px;background:linear-gradient(145deg,#151d42,#181331);box-shadow:0 18px 40px #0004}.quiz-card h3{margin:0 0 6px;font-size:19px}.quiz-card .quiz-intro{color:#9da8ca;font-size:12px;margin:0 0 14px}.quiz-item{border-top:1px solid #303762;padding:16px 0}.quiz-item strong{display:block;color:#f4f5ff;font-size:13px;line-height:1.5}.quiz-choice{display:flex;gap:9px;align-items:flex-start;margin-top:10px;color:#c3cae3;font-size:12px;font-weight:400}.quiz-choice input{width:auto;margin-top:2px;padding:0}.quiz-submit{margin-top:12px;padding:12px 18px}.quiz-result{color:#72edc3;font:12px 'DM Mono',monospace;margin-top:14px}.quiz-explanation{display:none;color:#aeb8d6;font-size:11px;line-height:1.5;margin:8px 0 0}.quiz-card.is-graded .quiz-explanation{display:block}.quiz-card.is-graded .quiz-choice.correct{color:#72edc3}.quiz-card.is-graded .quiz-choice.wrong{color:#ff9bc4}
+    @media(max-width:900px){.rag-page{padding:42px 18px 65px}body.dashboard .rag-layout{grid-template-columns:1fr}.rag-library{position:static}.rag-messages{height:380px}.rag-form{display:block}.rag-form button{width:100%;padding:14px;margin-top:10px}}
+  </style>
+</head>
+<body class="dashboard">
+  <header><div class="brand"><img src="/static/images/study-buddy-logo.png" alt="Study Buddy logo"><span>Study Buddy</span></div><nav><a href="/dashboard">Home</a><form method="post" action="/logout"><button class="link-button" type="submit">Sign out</button></form></nav></header>
+  <main class="rag-page">
+    <div class="rag-head"><div class="eyebrow">PAGE 2 · DOCUMENT STUDY</div><h1>Learn from your material.</h1></div>
+    <div class="rag-layout">
+      <aside class="rag-library">
+        <span class="label">YOUR STUDY LIBRARY</span><h2>Bring your notes in.</h2><p>Use lecture notes, textbooks, assignments, or revision material as the source for your lesson.</p>
+        <form id="upload-form" class="upload-zone"><input name="file" type="file" accept="application/pdf" required><button type="submit">Add PDF to library ↗</button><small id="upload-status" class="upload-status"></small></form>
+        <div class="doc-list" id="doc-list">{% for document in documents %}<div class="doc-item"><div>{{ document['filename'] }}<small>Saved {{ document['created_at'] }}</small></div></div>{% else %}<div class="doc-item">No PDFs yet. Add your first document.</div>{% endfor %}</div>
+        <div class="rag-callout"><b>RAG teacher active</b><br>Your questions are matched with relevant passages from your private study library.</div>
+      </aside>
+      <section class="rag-chat"><span class="label">DOCUMENT-GROUNDED CHAT</span><h2>Ask about your notes.</h2><p class="subhead">Try: “Explain page 3 in simple words” or “Quiz me on this chapter.”</p><div id="messages" class="rag-messages">{% for message in messages %}<div class="bubble {{ message['role'] }}">{{ message['message'] }}</div>{% else %}<div class="bubble assistant">Upload a PDF, then ask me about its content.</div>{% endfor %}</div><form id="chat-form" class="rag-form"><input id="chat-input" name="message" placeholder="Ask a question about your document..." required><button type="submit">Ask from notes ↗</button></form><div class="rag-tip"><b>Private context</b> · Answers use your uploaded documents when relevant.</div></section>
+    </div>
+  </main>
+  <script src="/static/js/escalation.js"></script><script>
+    const csrf=()=>({'X-CSRF-Token':decodeURIComponent(document.cookie.match(/(?:^|; )csrf_token=([^;]*)/)?.[1]||'')});
+    const form=document.getElementById('chat-form'),input=document.getElementById('chat-input'),messages=document.getElementById('messages');
+    function safe(v){return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;')}
+    function render(items){messages.innerHTML=items.map(x=>`<div class="bubble ${x.role}">${safe(x.message)}</div>`).join('');messages.scrollTop=messages.scrollHeight}
+    form.onsubmit=async e=>{e.preventDefault();const text=input.value.trim();if(text){input.value='';const d=await fetch('/api/rag/chat',{method:'POST',headers:csrf(),body:new URLSearchParams({message:text})}).then(r=>r.json());if(d.messages)render(d.messages)}};
+    document.getElementById('upload-form').onsubmit=async e=>{e.preventDefault();const status=document.getElementById('upload-status');status.textContent='Reading PDF and preparing context…';const d=await fetch('/api/documents',{method:'POST',headers:csrf(),body:new FormData(e.target)}).then(r=>r.json());if(d.filename){status.textContent=`Added ${d.filename} · ${d.characters} characters indexed`;const list=document.getElementById('doc-list');const item=document.createElement('div');item.className='doc-item';item.textContent=d.filename;list.prepend(item);e.target.reset()}else status.textContent=d.detail||d.error||'Could not add this PDF'};
+    messages.scrollTop=messages.scrollHeight;
+  </script>
+  <script>
+    (()=>{
+      const chatForm=document.getElementById('chat-form');
+      const input=document.getElementById('chat-input');
+      const messages=document.getElementById('messages');
+      const chatButton=document.getElementById('chat-button')||chatForm?.querySelector('button');
+      const uploadForm=document.getElementById('upload-form');
+      const uploadButton=uploadForm?.querySelector('button');
+      const uploadStatus=document.getElementById('upload-status');
+      const status=document.createElement('div'); status.className='rag-status'; status.setAttribute('aria-live','polite');
+      if(chatForm) chatForm.insertAdjacentElement('afterend',status);
+      document.querySelectorAll('.rag-chat .rag-form').forEach(form=>{
+        const chips=document.createElement('div'); chips.className='prompt-chips';
+        [['Summarize this document in simple words','Summarize it'],['Explain the most important concepts with examples','Explain key ideas'],['Create 5 MCQs from this document and include the answers','Make MCQs']].forEach(([prompt,label])=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.dataset.prompt=prompt;b.onclick=()=>{input.value=prompt;input.focus()};chips.append(b)});
+        form.parentElement.insertBefore(chips, messages);
+      });
+      if(chatForm) chatForm.addEventListener('submit',()=>{if(chatButton){chatButton.disabled=true;chatButton.textContent='Teacher is thinking…'}status.textContent='Finding the most relevant parts of your notes…';setTimeout(()=>{if(chatButton){chatButton.disabled=false;chatButton.textContent='Ask from notes ↗'}status.textContent=''},1200)},true);
+      if(uploadForm) uploadForm.addEventListener('submit',()=>{if(uploadButton){uploadButton.disabled=true;uploadButton.textContent='Reading your PDF…'}if(uploadStatus)uploadStatus.textContent='Extracting text and preparing your private study context…'},true);
+    })();
+  </script>
+  <script>
+    (()=>{
+      const form=document.getElementById('chat-form'),input=document.getElementById('chat-input'),messages=document.getElementById('messages'),csrfHeader=()=>({'X-CSRF-Token':decodeURIComponent(document.cookie.match(/(?:^|; )csrf_token=([^;]*)/)?.[1]||'')});
+      const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+      const wantsQuiz=text=>/\b(mcq|mcqs|multiple[- ]choice|quiz)\b/i.test(text);
+      async function generateQuiz(){
+        const old=messages.querySelector('.quiz-card'); old?.remove();
+        const card=document.createElement('div'); card.className='quiz-card'; card.innerHTML='<h3>Building your practice quiz…</h3><p class="quiz-intro">I’m using your uploaded material to create focused questions.</p>'; messages.append(card); messages.scrollTop=messages.scrollHeight;
+        const response=await fetch('/api/quiz/generate',{method:'POST',headers:csrfHeader()}); const data=await response.json();
+        if(!data.questions){const reason=data.detail==='upload_pdf_first'?'Add a PDF to your study library first, then I can build a quiz from it.':(data.detail||data.error||'Upload a PDF first, then try again.');card.innerHTML=`<h3>Quiz unavailable</h3><p class="quiz-intro">${esc(reason)}</p>`;return}
+        card.innerHTML=`<h3>Quick practice quiz</h3><p class="quiz-intro">Choose one answer for each question. I’ll explain every answer after you submit.</p><form class="quiz-form">${data.questions.map((q,i)=>`<div class="quiz-item"><strong>${i+1}. ${esc(q.question)}</strong>${q.options.map((option,j)=>`<label class="quiz-choice"><input type="radio" name="q${i}" value="${j}" required><span>${esc(option)}</span></label>`).join('')}<p class="quiz-explanation"><b>Explanation:</b> ${esc(q.explanation||'Review the source material for this concept.')}</p></div>`).join('')}<button class="quiz-submit" type="submit">Check my answers ↗</button><div class="quiz-result" aria-live="polite"></div></form>`;
+        const quizForm=card.querySelector('.quiz-form'),result=card.querySelector('.quiz-result');
+        quizForm.onsubmit=async event=>{event.preventDefault();const answers=data.questions.map((_,i)=>quizForm.querySelector(`input[name="q${i}"]:checked`)?.value);if(answers.some(answer=>answer===undefined)){result.textContent='Choose an answer for every question first.';return}const submit=quizForm.querySelector('.quiz-submit');submit.disabled=true;submit.textContent='Checking…';const checked=await fetch(`/api/quiz/${data.quiz_id}/submit`,{method:'POST',headers:csrfHeader(),body:new URLSearchParams({answers:JSON.stringify(answers)})}).then(r=>r.json());result.textContent=checked.total?`Score: ${checked.score}/${checked.total} · Read the explanations below.`:'Could not score this quiz.';card.classList.add('is-graded');data.questions.forEach((q,i)=>{const choices=quizForm.querySelectorAll(`input[name="q${i}"]`);choices.forEach((radio,j)=>{radio.disabled=true;radio.parentElement.classList.toggle('correct',j===Number(q.answer));radio.parentElement.classList.toggle('wrong',radio.checked&&j!==Number(q.answer))})});submit.textContent='Quiz completed';messages.scrollTop=messages.scrollHeight};
+      }
+      document.querySelectorAll('.prompt-chips button').forEach(button=>{button.addEventListener('click',event=>{if(wantsQuiz(button.dataset.prompt||button.textContent)){event.preventDefault();input.value='';generateQuiz()}})});
+      form?.addEventListener('submit',event=>{if(wantsQuiz(input.value)){event.preventDefault();event.stopImmediatePropagation();input.value='';generateQuiz()}},true);
+    })();
+  </script>
+  <script>
+    (()=>{
+      const list=document.getElementById('doc-list');
+      const csrf=()=>({'X-CSRF-Token':decodeURIComponent(document.cookie.match(/(?:^|; )csrf_token=([^;]*)/)?.[1]||'')});
+      const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+      async function syncDocuments(){
+        const response=await fetch('/api/documents',{headers:csrf()});
+        if(!response.ok)return;
+        const data=await response.json();
+        list.innerHTML=data.documents.length?data.documents.map(doc=>`<div class="doc-item" data-document-id="${doc.id}"><div>${esc(doc.filename)}<small>Saved ${esc(doc.created_at)}</small></div><div class="doc-actions"><button class="doc-delete" type="button">Remove</button></div></div>`).join(''):'<div class="doc-item">No PDFs yet. Add your first document.</div>';
+        list.querySelectorAll('.doc-delete').forEach(button=>button.onclick=async()=>{const item=button.closest('.doc-item');if(!window.confirm('Remove this PDF from your study library?'))return;item.classList.add('is-removing');const response=await fetch(`/api/documents/${item.dataset.documentId}`,{method:'DELETE',headers:csrf()});if(response.ok)syncDocuments();else item.classList.remove('is-removing')});
+      }
+      syncDocuments();
+      document.getElementById('upload-form')?.addEventListener('submit',()=>setTimeout(syncDocuments,1200),true);
+    })();
+  </script>
+</body>
+</html>

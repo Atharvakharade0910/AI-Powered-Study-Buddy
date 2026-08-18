@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+*.pyc
+study_buddy.db
+data/*.db
+.env
+.env.local
