@@ -71,9 +71,9 @@ The default database is `data/study_buddy.db`. Uploaded PDF text and prompts are
 
 ## Production notes
 
-The local app intentionally uses SQLite and an in-process rate limiter. A production deployment should use PostgreSQL, HTTPS, `COOKIE_SECURE=1`, a shared rate-limit store, database migrations, password reset delivery, structured observability, and a malware/document scanning pipeline.
+The local app intentionally uses SQLite. The production Compose stack uses PostgreSQL, Alembic migrations, Redis-backed rate limits/live-session coordination, HTTPS expectations, `COOKIE_SECURE=1`, and private S3-compatible storage when configured. Password reset delivery, structured observability, and a malware/document scanning pipeline remain production operating requirements.
 
-The repository now includes a production-oriented Docker image, Docker Compose files, a CI workflow, Redis-backed rate limiting when `REDIS_URL` is configured, a `/api/ready` dependency check, and bounded PDF extraction workers. The default Docker image intentionally runs one application worker because the current persistence layer is SQLite. Do not add multiple application workers or replicas until the SQLite store has been migrated to PostgreSQL with a tested migration path and shared document storage.
+The repository includes a production-oriented Docker image, Docker Compose files, a CI workflow, PostgreSQL/Alembic support, Redis-backed rate limiting, shared live-session coordination, a `/api/ready` dependency check, private object-storage integration, and bounded PDF extraction workers. The local Docker Compose file remains SQLite-based; the production Compose file starts PostgreSQL and runs `alembic upgrade head` before the application.
 
 For the current controlled deployment path:
 

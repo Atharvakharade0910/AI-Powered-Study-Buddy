@@ -5,3 +5,4 @@ study_buddy.db
 data/*.db
 .env
 .env.local
+.env.production

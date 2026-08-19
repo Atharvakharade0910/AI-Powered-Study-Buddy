@@ -26,6 +26,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import File, UploadFile
 from dotenv import load_dotenv
+from database import PostgresConnection
+from storage import delete_pdf, put_pdf
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -39,6 +41,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(
 configured_db_path = Path(os.getenv("STUDY_BUDDY_DB", "data/study_buddy.db"))
 DB_PATH = configured_db_path if configured_db_path.is_absolute() else BASE_DIR / configured_db_path
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SESSION_DAYS = 14
 MAX_MESSAGE_CHARS = 8_000
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -66,6 +69,10 @@ PHONE_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
 PHONE_VERIFICATION_MAX_RESENDS = 3
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "dev").strip().lower()
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+if APP_ENV in {"production", "prod"} and not DATABASE_URL.startswith(("postgres://", "postgresql://")):
+    raise RuntimeError("Production requires DATABASE_URL to point to PostgreSQL")
+if APP_ENV in {"production", "prod"} and not os.getenv("REDIS_URL", "").strip():
+    raise RuntimeError("Production requires REDIS_URL for shared rate limits and live-session coordination")
 if APP_ENV in {"production", "prod"} and (PHONE_VERIFICATION_DEV_MODE or SMS_PROVIDER == "dev"):
     raise RuntimeError("Production requires PHONE_VERIFICATION_DEV_MODE=0 and a real SMS_PROVIDER")
 if APP_ENV in {"production", "prod"} and os.getenv("PHONE_VERIFICATION_CODE", "").strip():
@@ -97,7 +104,9 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def db() -> sqlite3.Connection:
+def db() -> Any:
+    if DATABASE_URL.startswith(("postgres://", "postgresql://")):
+        return PostgresConnection(DATABASE_URL)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -179,6 +188,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 filename TEXT NOT NULL,
                 content TEXT NOT NULL,
+                storage_key TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS quizzes (
@@ -269,6 +279,9 @@ def init_db() -> None:
             if column not in review_columns:
                 connection.execute(f"ALTER TABLE review_cards ADD COLUMN {column} {definition}")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_conversation_documents_document ON conversation_documents(document_id)")
+        document_columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)").fetchall()}
+        if "storage_key" not in document_columns:
+            connection.execute("ALTER TABLE documents ADD COLUMN storage_key TEXT")
         connection.execute("DELETE FROM registration_challenges WHERE expires_at <= ?", (utc_now(),))
 
 
@@ -656,6 +669,37 @@ def shared_redis():
     return _redis_client
 
 
+def acquire_live_slot(user_id: int) -> bool:
+    client = shared_redis()
+    if client is None:
+        if os.getenv("REDIS_URL", "").strip() and APP_ENV in {"production", "prod"}:
+            return False
+        if _live_connections.get(user_id, 0) >= MAX_LIVE_CONNECTIONS_PER_USER:
+            return False
+        _live_connections[user_id] = _live_connections.get(user_id, 0) + 1
+        return True
+    try:
+        return bool(client.set(f"study-buddy:live:{user_id}", "1", nx=True, ex=3600))
+    except Exception as error:
+        logger.warning("Shared live-session store failed: %s", type(error).__name__)
+        return False
+
+
+def release_live_slot(user_id: int) -> None:
+    client = shared_redis()
+    if client is not None:
+        try:
+            client.delete(f"study-buddy:live:{user_id}")
+        except Exception as error:
+            logger.warning("Shared live-session release failed: %s", type(error).__name__)
+        return
+    remaining = _live_connections.get(user_id, 1) - 1
+    if remaining > 0:
+        _live_connections[user_id] = remaining
+    else:
+        _live_connections.pop(user_id, None)
+
+
 def enforce_rate_limit(request: Request, bucket: str, identity: str = "anonymous") -> None:
     limit, window = RATE_LIMITS[bucket]
     client = shared_redis()
@@ -697,6 +741,7 @@ def validate_csrf(request: Request) -> None:
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     validate_csrf(request)
+    request_id = request.headers.get("x-request-id", "").strip()[:100] or secrets.token_hex(12)
     response = await call_next(request)
     if request.url.path == "/general" and response.headers.get("content-type", "").startswith("text/html"):
         chunks = [chunk async for chunk in response.body_iterator]
@@ -709,6 +754,10 @@ async def security_middleware(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("X-Request-ID", request_id)
+    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'")
+    if APP_ENV in {"production", "prod"}:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     return response
 
 
@@ -745,7 +794,7 @@ async def live_teacher(websocket: WebSocket):
         await websocket.send_json({"type": "error", "code": "auth_required", "message": "Your study session expired. Sign in again to use the voice teacher."})
         await websocket.close()
         return
-    if _live_connections.get(user["id"], 0) >= MAX_LIVE_CONNECTIONS_PER_USER:
+    if not acquire_live_slot(user["id"]):
         await websocket.send_json({"type": "error", "code": "live_session_limit", "message": "Only one live teacher session can be active for your account."})
         await websocket.close(code=1008)
         return
@@ -753,7 +802,6 @@ async def live_teacher(websocket: WebSocket):
         await websocket.send_json({"type": "error", "code": "missing_key", "message": "GEMINI_API_KEY is not configured on the server."})
         await websocket.close()
         return
-    _live_connections[user["id"]] = _live_connections.get(user["id"], 0) + 1
     try:
         from google import genai
         from google.genai import types
@@ -850,11 +898,7 @@ async def live_teacher(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        remaining = _live_connections.get(user["id"], 1) - 1
-        if remaining > 0:
-            _live_connections[user["id"]] = remaining
-        else:
-            _live_connections.pop(user["id"], None)
+        release_live_slot(user["id"])
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1426,6 +1470,16 @@ async def upload_document(request: Request, file: UploadFile = File(...), conver
             raise HTTPException(status_code=413, detail="document_storage_limit_reached")
         cursor = connection.execute("INSERT INTO documents (user_id, filename, content, created_at) VALUES (?, ?, ?, ?)", (user["id"], file.filename, text[:2_000_000], utc_now()))
         document_id = cursor.lastrowid
+    try:
+        storage_key = await loop.run_in_executor(_document_executor, put_pdf, user["id"], document_id, file.filename, raw)
+    except Exception as error:
+        logger.exception("Original PDF storage failed: %s", type(error).__name__)
+        with db() as connection:
+            connection.execute("DELETE FROM documents WHERE id = ? AND user_id = ?", (document_id, user["id"]))
+        raise HTTPException(status_code=503, detail="document_storage_unavailable")
+    if storage_key:
+        with db() as connection:
+            connection.execute("UPDATE documents SET storage_key = ? WHERE id = ? AND user_id = ?", (storage_key, document_id, user["id"]))
     with db() as connection:
         connection.execute(
             "INSERT OR IGNORE INTO conversation_documents (conversation_id, document_id, created_at) VALUES (?, ?, ?)",
@@ -1450,9 +1504,14 @@ def delete_document(document_id: int, study_session: str | None = Cookie(default
     if not user:
         api_auth_error()
     with db() as connection:
+        document = connection.execute("SELECT storage_key FROM documents WHERE id = ? AND user_id = ?", (document_id, user["id"])).fetchone()
         cursor = connection.execute("DELETE FROM documents WHERE id = ? AND user_id = ?", (document_id, user["id"]))
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="document_not_found")
+    try:
+        delete_pdf(document["storage_key"] if document else None)
+    except Exception as error:
+        logger.error("Original PDF deletion failed: %s", type(error).__name__)
     return {"deleted": True, "document_id": document_id}
 
 

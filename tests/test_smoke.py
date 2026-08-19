@@ -47,7 +47,10 @@ def isolated_database(tmp_path, monkeypatch):
 
 
 def test_public_pages_and_health() -> None:
-    assert client.get("/").status_code == 200
+    public_page = client.get("/")
+    assert public_page.status_code == 200
+    assert public_page.headers["x-request-id"]
+    assert "Content-Security-Policy" in public_page.headers
     assert client.get("/register").status_code == 200
     assert client.get("/api/health").json() == {"status": "ok", "service": "study-buddy"}
     readiness = client.get("/api/ready")

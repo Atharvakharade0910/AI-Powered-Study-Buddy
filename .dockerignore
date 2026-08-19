@@ -3,5 +3,6 @@
 __pycache__
 .pytest_cache
 .env
+.env.production
 data/*.db
 *.pyc
