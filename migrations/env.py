@@ -13,11 +13,17 @@ if config.config_file_name is not None:
 database_url = os.getenv("DATABASE_URL", "")
 if not database_url.startswith(("postgres://", "postgresql://")):
     raise RuntimeError("DATABASE_URL must be a PostgreSQL URL when running Alembic")
-config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+# SQLAlchemy's plain PostgreSQL URL defaults to psycopg2. The application uses
+# the modern psycopg 3 driver, so make the driver explicit for production
+# migrations while preserving support for postgres:// URLs.
+sqlalchemy_url = database_url.replace("postgres://", "postgresql+psycopg://", 1)
+if sqlalchemy_url.startswith("postgresql://"):
+    sqlalchemy_url = sqlalchemy_url.replace("postgresql://", "postgresql+psycopg://", 1)
+config.set_main_option("sqlalchemy.url", sqlalchemy_url.replace("%", "%%"))
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=database_url, literal_binds=True, dialect_opts={"paramstyle": "named"})
+    context.configure(url=sqlalchemy_url, literal_binds=True, dialect_opts={"paramstyle": "named"})
     with context.begin_transaction():
         context.run_migrations()
 

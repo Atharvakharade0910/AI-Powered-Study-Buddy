@@ -9,8 +9,16 @@ services:
       COOKIE_SECURE: "1"
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql://studybuddy:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/studybuddy
-    expose:
-      - "8000"
+      PHONE_VERIFICATION_DEV_MODE: ${PHONE_VERIFICATION_DEV_MODE:-0}
+      SMS_PROVIDER: ${SMS_PROVIDER:-twilio}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
+      GEMINI_LIVE_MODEL: ${GEMINI_LIVE_MODEL:-gemini-3.1-flash-live-preview}
+    # Publish the service for local smoke testing and a straightforward
+    # single-host deployment. Put a reverse proxy/load balancer in front of
+    # this port when scaling to multiple replicas.
+    ports:
+      - "8000:8000"
     volumes:
       - study_buddy_data:/app/data
     depends_on:
