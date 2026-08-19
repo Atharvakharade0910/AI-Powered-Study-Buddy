@@ -18,7 +18,7 @@ def register_verified(test_client: TestClient, identifier: str, phone: str) -> o
             "identifier": identifier,
             "full_name": "Test Student",
             "age_range": "16–17",
-            "standard": "Grade 10",
+            "standard": "Standard 9",
             "phone": phone,
             "password": "password123",
             "confirm_password": "password123",
@@ -50,6 +50,31 @@ def test_public_pages_and_health() -> None:
     assert client.get("/").status_code == 200
     assert client.get("/register").status_code == 200
     assert client.get("/api/health").json() == {"status": "ok", "service": "study-buddy"}
+
+
+def test_supported_standards_are_one_through_nine() -> None:
+    assert app.normalize_standard("Standard 1") == "Standard 1"
+    assert app.normalize_standard("grade 9") == "Standard 9"
+    assert app.normalize_standard("Standard 10") is None
+    assert app.normalize_standard("FY BSc") is None
+
+
+def test_registration_rejects_standard_ten() -> None:
+    response = client.post(
+        "/register",
+        data={
+            "identifier": "older@example.com",
+            "full_name": "Older Student",
+            "age_range": "16–17",
+            "standard": "Standard 10",
+            "phone": "+919876543299",
+            "password": "password123",
+            "confirm_password": "password123",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "Standards+1+to+9" in response.headers["location"] or "Standards%201%20to%209" in response.headers["location"]
 
 
 def test_protected_pages_redirect_without_session() -> None:
@@ -138,7 +163,7 @@ def test_phone_verification_required_and_profile_persists() -> None:
             "identifier": "verified@example.com",
             "full_name": "Verified Student",
             "age_range": "16–17",
-            "standard": "Grade 11",
+            "standard": "Standard 8",
             "phone": "+919876543209",
             "password": "password123",
             "confirm_password": "password123",
@@ -170,7 +195,7 @@ def test_phone_verification_required_and_profile_persists() -> None:
             "SELECT full_name, age_range, standard, phone, phone_verified FROM users WHERE identifier = ?",
             ("verified@example.com",),
         ).fetchone()
-    assert tuple(user) == ("Verified Student", "16–17", "Grade 11", "+919876543209", 1)
+    assert tuple(user) == ("Verified Student", "16–17", "Standard 8", "+919876543209", 1)
 
 
 def test_authenticated_pages_render_after_login() -> None:
@@ -191,7 +216,7 @@ def test_profile_update_and_phone_change_require_verification() -> None:
     assert profile_client.get("/profile").status_code == 200
     updated = profile_client.post(
         "/profile",
-        data={"full_name": "Updated Student", "age_range": "18–24", "standard": "University"},
+        data={"full_name": "Updated Student", "age_range": "18–24", "standard": "Standard 9"},
         headers=csrf,
         follow_redirects=False,
     )
@@ -216,7 +241,7 @@ def test_profile_update_and_phone_change_require_verification() -> None:
             "SELECT full_name, age_range, standard, phone, phone_verified FROM users WHERE identifier = ?",
             ("profile@example.com",),
         ).fetchone()
-    assert tuple(user) == ("Updated Student", "18–24", "University", "+919876543211", 1)
+    assert tuple(user) == ("Updated Student", "18–24", "Standard 9", "+919876543211", 1)
 
 
 def test_twilio_delivery_payload_and_missing_credentials(monkeypatch) -> None:
@@ -337,4 +362,192 @@ def test_quiz_submission_scores_and_persists() -> None:
         user_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("quiz@example.com",)).fetchone()["id"]
         quiz_id = connection.execute("INSERT INTO quizzes (user_id, title, questions_json, created_at) VALUES (?, ?, ?, ?)", (user_id, "Quick review", json.dumps(questions), app.utc_now())).lastrowid
     response = quiz_client.post(f"/api/quiz/{quiz_id}/submit", data={"answers": json.dumps([1])}, headers={"X-CSRF-Token": quiz_client.cookies["csrf_token"]})
-    assert response.json() == {"score": 1, "total": 1}
+    assert response.json() == {
+        "score": 1,
+        "total": 1,
+        "review_cards_created": 0,
+        "cached": False,
+        "results": [{"correct_answer": 1, "explanation": "Basic addition."}],
+    }
+
+
+def test_rag_chat_fails_closed_without_document_context(monkeypatch) -> None:
+    rag_client = TestClient(app.app)
+    register_verified(rag_client, "no-docs@example.com", "+919876543220")
+    monkeypatch.setattr(app, "ai_answer", lambda *args, **kwargs: pytest.fail("RAG mode must not fall back to plain chat"))
+    response = rag_client.post(
+        "/api/rag/chat",
+        data={"message": "Explain photosynthesis"},
+        headers={"X-CSRF-Token": rag_client.cookies["csrf_token"]},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "upload_pdf_first"
+
+
+def test_quiz_generation_does_not_duplicate_context(monkeypatch) -> None:
+    quiz_client = TestClient(app.app)
+    register_verified(quiz_client, "quiz-context@example.com", "+919876543221")
+    monkeypatch.setattr(app, "context_for_user", lambda user_id: "[Source: notes.pdf, page 1]\nCell theory.")
+    calls = []
+
+    def fake_answer(prompt, context=""):
+        calls.append((prompt, context))
+        return json.dumps([{
+            "question": "What does cell theory describe?",
+            "options": ["Cells", "Stars", "Rocks", "Weather"],
+            "answer": 0,
+            "explanation": "It describes the basic principles of cells.",
+        }])
+
+    monkeypatch.setattr(app, "ai_answer", fake_answer)
+    response = quiz_client.post(
+        "/api/quiz/generate",
+        headers={"X-CSRF-Token": quiz_client.cookies["csrf_token"]},
+    )
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0][1].count("Cell theory.") == 1
+    assert "Material:" not in calls[0][1]
+
+
+def test_review_creation_is_rate_limited() -> None:
+    review_client = TestClient(app.app)
+    register_verified(review_client, "review-limit@example.com", "+919876543222")
+    headers = {"X-CSRF-Token": review_client.cookies["csrf_token"]}
+    responses = [
+        review_client.post("/api/reviews", data={"prompt": f"Question {index}", "answer": "Answer"}, headers=headers)
+        for index in range(app.RATE_LIMITS["review"][0] + 1)
+    ]
+    assert all(response.status_code == 200 for response in responses[:-1])
+    assert responses[-1].status_code == 429
+
+
+def test_chat_history_is_bounded_to_recent_messages() -> None:
+    history_client = TestClient(app.app)
+    register_verified(history_client, "history@example.com", "+919876543223")
+    with app.db() as connection:
+        user_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("history@example.com",)).fetchone()["id"]
+        connection.executemany(
+            "INSERT INTO chat_messages (user_id, role, message, created_at) VALUES (?, 'user', ?, ?)",
+            [(user_id, f"message-{index}", app.utc_now()) for index in range(app.MAX_CHAT_HISTORY + 10)],
+        )
+    messages = app.user_chat(user_id)
+    assert len(messages) == app.MAX_CHAT_HISTORY
+    assert messages[0]["message"] == "message-10"
+    assert messages[-1]["message"] == f"message-{app.MAX_CHAT_HISTORY + 9}"
+
+
+def test_frontends_define_visible_api_error_handling() -> None:
+    for template in (
+        "pages/dashboard4.html",
+        "pages/general_chat.html",
+        "pages/rag_workspace.html",
+    ):
+        contents = (app.BASE_DIR / "templates" / template).read_text(encoding="utf-8")
+        assert "response.ok" in contents
+        assert "Request failed" in contents
+
+
+def test_document_conversations_are_user_scoped_and_switchable(monkeypatch) -> None:
+    first = TestClient(app.app)
+    second = TestClient(app.app)
+    register_verified(first, "conversation-first@example.com", "+919876543224")
+    register_verified(second, "conversation-second@example.com", "+919876543225")
+    csrf = {"X-CSRF-Token": first.cookies["csrf_token"]}
+    created = first.post(
+        "/api/conversations",
+        data={"title": "Biology revision", "mode": "document"},
+        headers=csrf,
+    )
+    assert created.status_code == 200
+    conversation_id = created.json()["conversation"]["id"]
+    with app.db() as connection:
+        user_id = connection.execute(
+            "SELECT id FROM users WHERE identifier = ?", ("conversation-first@example.com",)
+        ).fetchone()["id"]
+        connection.execute(
+            "INSERT INTO documents (user_id, filename, content, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, "biology.pdf", "[Source: biology.pdf, page 1]\nCells have membranes.", app.utc_now()),
+        )
+        document_id = connection.execute("SELECT id FROM documents WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,)).fetchone()["id"]
+        connection.execute(
+            "INSERT INTO conversation_documents (conversation_id, document_id, created_at) VALUES (?, ?, ?)",
+            (conversation_id, document_id, app.utc_now()),
+        )
+    monkeypatch.setattr(app, "semantic_scores", lambda query, chunks: [0.0] * len(chunks))
+    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="": "grounded answer")
+    response = first.post(
+        "/api/rag/chat",
+        data={"message": "What do cells have?", "conversation_id": conversation_id},
+        headers=csrf,
+    )
+    assert response.status_code == 200
+    assert response.json()["conversation_id"] == conversation_id
+    assert len(first.get(f"/api/chat?conversation_id={conversation_id}").json()["messages"]) == 2
+    assert second.get(f"/api/chat?conversation_id={conversation_id}").status_code == 404
+
+
+def test_wrong_quiz_answers_create_deduplicated_review_cards() -> None:
+    review_client = TestClient(app.app)
+    register_verified(review_client, "adaptive@example.com", "+919876543226")
+    questions = [{"question": "Which option is correct?", "options": ["A", "B", "C", "D"], "answer": 2, "explanation": "Option C is correct."}]
+    with app.db() as connection:
+        user_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("adaptive@example.com",)).fetchone()["id"]
+        quiz_id = connection.execute(
+            "INSERT INTO quizzes (user_id, title, questions_json, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, "Adaptive quiz", json.dumps(questions), app.utc_now()),
+        ).lastrowid
+    csrf = {"X-CSRF-Token": review_client.cookies["csrf_token"]}
+    first = review_client.post(f"/api/quiz/{quiz_id}/submit", data={"answers": json.dumps([0])}, headers=csrf)
+    second = review_client.post(f"/api/quiz/{quiz_id}/submit", data={"answers": json.dumps([0])}, headers=csrf)
+    assert first.json()["review_cards_created"] == 1
+    assert second.json()["review_cards_created"] == 0
+    assert len(review_client.get("/api/reviews").json()["reviews"]) == 1
+    progress = review_client.get("/api/learning/progress").json()
+    assert progress["topics"][0]["topic"] == "Document study"
+
+
+def test_review_cards_can_be_completed_and_rescheduled() -> None:
+    review_client = TestClient(app.app)
+    register_verified(review_client, "review-complete@example.com", "+919876543228")
+    csrf = {"X-CSRF-Token": review_client.cookies["csrf_token"]}
+    created = review_client.post("/api/reviews", data={"prompt": "What is a cell?", "answer": "The basic unit of life."}, headers=csrf)
+    review_id = created.json()["id"]
+    completed = review_client.post(f"/api/reviews/{review_id}/complete", data={"remembered": "true"}, headers=csrf)
+    assert completed.status_code == 200
+    assert completed.json()["interval_days"] == 1
+    repeated = review_client.post(f"/api/reviews/{review_id}/complete", data={"remembered": "false"}, headers=csrf)
+    assert repeated.status_code == 200
+    assert repeated.json()["interval_days"] == 1
+
+
+def test_invalid_conversation_id_is_not_silently_rerouted() -> None:
+    conversation_client = TestClient(app.app)
+    register_verified(conversation_client, "invalid-conversation@example.com", "+919876543229")
+    response = conversation_client.get("/api/chat?conversation_id=999999")
+    assert response.status_code == 404
+
+
+def test_first_login_onboarding_is_per_user_and_persisted() -> None:
+    onboarding_client = TestClient(app.app)
+    register_verified(onboarding_client, "onboarding@example.com", "+919876543227")
+    first_dashboard = onboarding_client.get("/dashboard")
+    assert first_dashboard.status_code == 200
+    assert "welcome-tour" in first_dashboard.text
+    assert "Hear the introduction" in first_dashboard.text
+    completed = onboarding_client.post(
+        "/api/onboarding/complete",
+        headers={"X-CSRF-Token": onboarding_client.cookies["csrf_token"]},
+    )
+    assert completed.json() == {"completed": True}
+    returning_dashboard = onboarding_client.get("/dashboard")
+    assert 'class="welcome-tour"' in returning_dashboard.text
+    assert 'class="welcome-tour" hidden' in returning_dashboard.text
+
+
+def test_onboarding_completion_requires_authentication() -> None:
+    response = client.post(
+        "/api/onboarding/complete",
+        headers={"X-CSRF-Token": client.cookies.get("csrf_token", "")},
+    )
+    assert response.status_code == 401

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import base64
+import binascii
 import hmac
 import json
 import logging
@@ -41,6 +42,8 @@ SESSION_DAYS = 14
 MAX_MESSAGE_CHARS = 8_000
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_CONTEXT_CHARS = 24_000
+MAX_DOCUMENTS_PER_USER = 50
+MAX_DOCUMENT_STORAGE_CHARS = 20_000_000
 RAG_TOP_K = 6
 RAG_EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 RATE_LIMIT_WINDOW_SECONDS = 60
@@ -49,7 +52,13 @@ RATE_LIMITS = {
     "chat": (30, RATE_LIMIT_WINDOW_SECONDS),
     "upload": (6, RATE_LIMIT_WINDOW_SECONDS),
     "quiz": (10, RATE_LIMIT_WINDOW_SECONDS),
+    "review": (30, RATE_LIMIT_WINDOW_SECONDS),
 }
+MAX_CHAT_HISTORY = 100
+MAX_WS_AUDIO_BYTES = 96 * 1024
+MAX_WS_TEXT_CHARS = 8_000
+MAX_WS_MESSAGES_PER_MINUTE = 1_200
+MAX_LIVE_CONNECTIONS_PER_USER = 1
 PHONE_VERIFICATION_TTL_MINUTES = 10
 PHONE_VERIFICATION_DEV_MODE = os.getenv("PHONE_VERIFICATION_DEV_MODE", "1") == "1"
 PHONE_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
@@ -58,11 +67,17 @@ SMS_PROVIDER = os.getenv("SMS_PROVIDER", "dev").strip().lower()
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 if APP_ENV in {"production", "prod"} and (PHONE_VERIFICATION_DEV_MODE or SMS_PROVIDER == "dev"):
     raise RuntimeError("Production requires PHONE_VERIFICATION_DEV_MODE=0 and a real SMS_PROVIDER")
+if APP_ENV in {"production", "prod"} and os.getenv("PHONE_VERIFICATION_CODE", "").strip():
+    raise RuntimeError("Production must not use a fixed phone verification code")
+if APP_ENV in {"production", "prod"} and os.getenv("COOKIE_SECURE", "0") != "1":
+    raise RuntimeError("Production requires COOKIE_SECURE=1")
 _rate_limit_hits: dict[tuple[str, str], list[float]] = {}
+_live_connections: dict[int, int] = {}
 _embedding_model = None
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,20}$")
 AGE_RANGE_OPTIONS = ("Under 13", "13–15", "16–17", "18–24", "25+")
+STANDARD_OPTIONS = tuple(f"Standard {number}" for number in range(1, 10))
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -102,6 +117,7 @@ def init_db() -> None:
                 phone TEXT,
                 phone_verified INTEGER NOT NULL DEFAULT 0,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                onboarding_completed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS registration_challenges (
@@ -131,9 +147,18 @@ def init_db() -> None:
                 kind TEXT NOT NULL DEFAULT 'note',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('general', 'document', 'voice')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
                 role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -156,6 +181,8 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 title TEXT NOT NULL,
+                topic TEXT NOT NULL DEFAULT 'Document study',
+                document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
                 questions_json TEXT NOT NULL,
                 score INTEGER,
                 created_at TEXT NOT NULL
@@ -167,6 +194,35 @@ def init_db() -> None:
                 answer TEXT NOT NULL,
                 due_at TEXT NOT NULL,
                 interval_days INTEGER NOT NULL DEFAULT 1,
+                repetitions INTEGER NOT NULL DEFAULT 0,
+                completed_at TEXT,
+                topic TEXT NOT NULL DEFAULT 'Document study',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS conversation_documents (
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (conversation_id, document_id)
+            );
+            CREATE TABLE IF NOT EXISTS quiz_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                quiz_id INTEGER NOT NULL REFERENCES quizzes(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                answer_hash TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                result_json TEXT NOT NULL,
+                review_cards_created INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE (quiz_id, answer_hash)
+            );
+            CREATE TABLE IF NOT EXISTS learning_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                score REAL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
             """
@@ -181,6 +237,7 @@ def init_db() -> None:
             ("age_range", "TEXT"),
             ("phone", "TEXT"),
             ("phone_verified", "INTEGER NOT NULL DEFAULT 0"),
+            ("onboarding_completed", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in columns:
                 connection.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
@@ -193,6 +250,21 @@ def init_db() -> None:
             if column not in challenge_columns:
                 connection.execute(f"ALTER TABLE registration_challenges ADD COLUMN {column} {definition}")
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone) WHERE phone IS NOT NULL")
+        chat_columns = {row[1] for row in connection.execute("PRAGMA table_info(chat_messages)").fetchall()}
+        if "conversation_id" not in chat_columns:
+            connection.execute("ALTER TABLE chat_messages ADD COLUMN conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_learning_events_user_topic ON learning_events(user_id, topic, created_at DESC)")
+        quiz_columns = {row[1] for row in connection.execute("PRAGMA table_info(quizzes)").fetchall()}
+        for column, definition in (("topic", "TEXT NOT NULL DEFAULT 'Document study'"), ("document_id", "INTEGER")):
+            if column not in quiz_columns:
+                connection.execute(f"ALTER TABLE quizzes ADD COLUMN {column} {definition}")
+        review_columns = {row[1] for row in connection.execute("PRAGMA table_info(review_cards)").fetchall()}
+        for column, definition in (("repetitions", "INTEGER NOT NULL DEFAULT 0"), ("completed_at", "TEXT"), ("topic", "TEXT NOT NULL DEFAULT 'Document study'")):
+            if column not in review_columns:
+                connection.execute(f"ALTER TABLE review_cards ADD COLUMN {column} {definition}")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_conversation_documents_document ON conversation_documents(document_id)")
         connection.execute("DELETE FROM registration_challenges WHERE expires_at <= ?", (utc_now(),))
 
 
@@ -212,6 +284,11 @@ def normalize_phone(value: str) -> str | None:
     if PHONE_RE.fullmatch(value) and compact_phone.startswith("+"):
         return compact_phone
     return None
+
+
+def normalize_standard(value: str) -> str | None:
+    match = re.fullmatch(r"(?:standard|std|grade)?\s*([1-9])", value.strip(), re.IGNORECASE)
+    return f"Standard {match.group(1)}" if match else None
 
 
 def mask_phone(phone: str) -> str:
@@ -328,12 +405,104 @@ def current_user(session_token: str | None) -> sqlite3.Row | None:
     return row
 
 
-def user_chat(user_id: int) -> list[sqlite3.Row]:
+def get_or_create_conversation(user_id: int, conversation_id: int | None = None, mode: str = "general") -> sqlite3.Row:
+    with db() as connection:
+        row = None
+        if conversation_id:
+            row = connection.execute(
+                "SELECT * FROM conversations WHERE id = ? AND user_id = ? AND mode = ?",
+                (conversation_id, user_id, mode),
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="conversation_not_found")
+        if not row:
+            row = connection.execute(
+                "SELECT * FROM conversations WHERE user_id = ? AND mode = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+                (user_id, mode),
+            ).fetchone()
+        if row:
+            return row
+        now = utc_now()
+        cursor = connection.execute(
+            "INSERT INTO conversations (user_id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, "General study" if mode == "general" else "New document study", mode, now, now),
+        )
+        return connection.execute("SELECT * FROM conversations WHERE id = ?", (cursor.lastrowid,)).fetchone()
+
+
+def user_conversations(user_id: int, mode: str | None = None) -> list[sqlite3.Row]:
+    with db() as connection:
+        if mode:
+            return connection.execute(
+                "SELECT * FROM conversations WHERE user_id = ? AND mode = ? ORDER BY updated_at DESC, id DESC",
+                (user_id, mode),
+            ).fetchall()
+        return connection.execute(
+            "SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC, id DESC", (user_id,)
+        ).fetchall()
+
+
+def user_conversation(user_id: int, conversation_id: int) -> sqlite3.Row | None:
     with db() as connection:
         return connection.execute(
-            "SELECT role, message, created_at FROM chat_messages WHERE user_id = ? ORDER BY id ASC",
-            (user_id,),
-        ).fetchall()
+            "SELECT * FROM conversations WHERE id = ? AND user_id = ?", (conversation_id, user_id)
+        ).fetchone()
+
+
+def attach_legacy_documents(user_id: int, conversation_id: int) -> None:
+    with db() as connection:
+        attached = connection.execute(
+            "SELECT 1 FROM conversation_documents WHERE conversation_id = ? LIMIT 1", (conversation_id,)
+        ).fetchone()
+        if not attached:
+            connection.execute(
+                "INSERT OR IGNORE INTO conversation_documents (conversation_id, document_id, created_at) SELECT ?, id, ? FROM documents WHERE user_id = ?",
+                (conversation_id, utc_now(), user_id),
+            )
+
+
+def save_chat_turn(user_id: int, user_message: str, assistant_message: str, conversation_id: int | None = None, mode: str = "general") -> int:
+    conversation = get_or_create_conversation(user_id, conversation_id, mode)
+    title = conversation["title"]
+    if title in {"General study", "New document study"}:
+        title = user_message.strip().replace("\n", " ")[:60] or title
+    with db() as connection:
+        connection.executemany(
+            "INSERT INTO chat_messages (user_id, conversation_id, role, message, created_at) VALUES (?, ?, ?, ?, ?)",
+            [
+                (user_id, conversation["id"], "user", user_message, utc_now()),
+                (user_id, conversation["id"], "assistant", assistant_message, utc_now()),
+            ],
+        )
+        connection.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (title, utc_now(), conversation["id"], user_id),
+        )
+    return int(conversation["id"])
+
+
+def record_learning_event(user_id: int, event_type: str, topic: str, score: float | None = None, metadata: dict | None = None) -> None:
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO learning_events (user_id, event_type, topic, score, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, event_type, topic[:120], score, json.dumps(metadata or {}), utc_now()),
+        )
+
+
+def user_chat(user_id: int, limit: int = MAX_CHAT_HISTORY, conversation_id: int | None = None) -> list[sqlite3.Row]:
+    limit = max(1, min(int(limit), MAX_CHAT_HISTORY))
+    with db() as connection:
+        if conversation_id:
+            rows = connection.execute(
+                "SELECT role, message, created_at FROM chat_messages WHERE user_id = ? AND conversation_id = ? ORDER BY id DESC LIMIT ?",
+                (user_id, conversation_id, limit),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT role, message, created_at FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+    return list(reversed(rows))
 
 
 def voice_history(user_id: int) -> list[sqlite3.Row]:
@@ -396,13 +565,36 @@ def semantic_scores(query: str, chunks: list[str]) -> list[float]:
         raise RuntimeError("rag_embedding_unavailable") from error
 
 
-def context_for_user(user_id: int, query: str = "") -> str:
+def _bounded_context(chunks: list[str]) -> str:
+    total_chars = 0
+    bounded: list[str] = []
+    for chunk in chunks[:RAG_TOP_K]:
+        if total_chars + len(chunk) > MAX_CONTEXT_CHARS:
+            break
+        bounded.append(chunk)
+        total_chars += len(chunk)
+    return "\n".join(bounded)
+
+
+def _document_chunks_for_user(user_id: int, conversation_id: int | None = None) -> list[str]:
     with db() as connection:
-        documents = connection.execute("SELECT filename, content FROM documents WHERE user_id = ?", (user_id,)).fetchall()
-    terms = {term.lower() for term in re.findall(r"[a-zA-Z]{3,}", query)}
-    chunks = [chunk for document in documents for chunk in document_chunks(document["filename"], document["content"])]
+        if conversation_id:
+            documents = connection.execute(
+                "SELECT documents.filename, documents.content FROM documents JOIN conversation_documents ON conversation_documents.document_id = documents.id WHERE documents.user_id = ? AND conversation_documents.conversation_id = ?",
+                (user_id, conversation_id),
+            ).fetchall()
+        else:
+            documents = connection.execute("SELECT filename, content FROM documents WHERE user_id = ?", (user_id,)).fetchall()
+    return [chunk for document in documents for chunk in document_chunks(document["filename"], document["content"])]
+
+
+def context_for_user(user_id: int, query: str = "", conversation_id: int | None = None) -> str:
+    chunks = _document_chunks_for_user(user_id, conversation_id)
     if not chunks:
         return ""
+    if not query.strip():
+        return _bounded_context(chunks)
+    terms = {term.lower() for term in re.findall(r"[a-zA-Z]{3,}", query)}
     semantic = semantic_scores(query, chunks)
     lexical = [sum(term in chunk.lower() for term in terms) for chunk in chunks]
     max_lexical = max(lexical, default=1) or 1
@@ -411,15 +603,7 @@ def context_for_user(user_id: int, query: str = "") -> str:
         key=lambda item: 0.45 * (item[1] / max_lexical) + 0.55 * item[2],
         reverse=True,
     )
-    selected = [chunk for chunk, _, _ in ranked[:RAG_TOP_K]]
-    total_chars = 0
-    bounded: list[str] = []
-    for chunk in selected:
-        if total_chars + len(chunk) > MAX_CONTEXT_CHARS:
-            break
-        bounded.append(chunk)
-        total_chars += len(chunk)
-    return "\n".join(bounded)
+    return _bounded_context([chunk for chunk, _, _ in ranked])
 
 
 def redirect_with_session(url: str, token: str) -> RedirectResponse:
@@ -483,10 +667,15 @@ async def live_teacher(websocket: WebSocket):
         await websocket.send_json({"type": "error", "code": "auth_required", "message": "Your study session expired. Sign in again to use the voice teacher."})
         await websocket.close()
         return
+    if _live_connections.get(user["id"], 0) >= MAX_LIVE_CONNECTIONS_PER_USER:
+        await websocket.send_json({"type": "error", "code": "live_session_limit", "message": "Only one live teacher session can be active for your account."})
+        await websocket.close(code=1008)
+        return
     if not os.getenv("GEMINI_API_KEY"):
         await websocket.send_json({"type": "error", "code": "missing_key", "message": "GEMINI_API_KEY is not configured on the server."})
         await websocket.close()
         return
+    _live_connections[user["id"]] = _live_connections.get(user["id"], 0) + 1
     try:
         from google import genai
         from google.genai import types
@@ -503,16 +692,52 @@ async def live_teacher(websocket: WebSocket):
             pending_assistant = ""
 
             async def receive_browser():
+                message_stamps: list[float] = []
                 while True:
                     try:
-                        message = await websocket.receive_json()
+                        raw_message = await websocket.receive_text()
                     except WebSocketDisconnect:
                         save_voice_turn(user["id"], pending_user, pending_assistant)
                         raise
+                    if len(raw_message.encode("utf-8")) > MAX_WS_AUDIO_BYTES * 2:
+                        await websocket.send_json({"type": "error", "code": "message_too_large", "message": "That audio packet was too large."})
+                        await websocket.close(code=1009)
+                        return
+                    now = time.monotonic()
+                    message_stamps[:] = [stamp for stamp in message_stamps if now - stamp < 60]
+                    if len(message_stamps) >= MAX_WS_MESSAGES_PER_MINUTE:
+                        await websocket.send_json({"type": "error", "code": "live_rate_limit", "message": "The live teacher received too much audio. Please start a new lesson in a moment."})
+                        await websocket.close(code=1013)
+                        return
+                    message_stamps.append(now)
+                    try:
+                        message = json.loads(raw_message)
+                    except json.JSONDecodeError:
+                        await websocket.send_json({"type": "error", "code": "invalid_message", "message": "The live teacher received an invalid message."})
+                        continue
+                    if not isinstance(message, dict):
+                        await websocket.send_json({"type": "error", "code": "invalid_message", "message": "The live teacher received an invalid message."})
+                        continue
                     if message.get("type") == "audio":
-                        await session.send_realtime_input(audio=types.Blob(data=base64.b64decode(message["data"]), mime_type="audio/pcm;rate=16000"))
+                        encoded = message.get("data", "")
+                        if not isinstance(encoded, str) or len(encoded) > MAX_WS_AUDIO_BYTES * 2:
+                            await websocket.send_json({"type": "error", "code": "audio_too_large", "message": "That audio packet was too large."})
+                            await websocket.close(code=1009)
+                            return
+                        try:
+                            audio = base64.b64decode(encoded, validate=True)
+                        except (ValueError, binascii.Error):
+                            await websocket.send_json({"type": "error", "code": "invalid_audio", "message": "The live teacher received invalid audio data."})
+                            continue
+                        if len(audio) > MAX_WS_AUDIO_BYTES:
+                            await websocket.send_json({"type": "error", "code": "audio_too_large", "message": "That audio packet was too large."})
+                            await websocket.close(code=1009)
+                            return
+                        await session.send_realtime_input(audio=types.Blob(data=audio, mime_type="audio/pcm;rate=16000"))
                     elif message.get("type") == "text":
-                        await session.send_realtime_input(text=message.get("text", ""))
+                        text = message.get("text", "")
+                        if isinstance(text, str) and text.strip() and len(text) <= MAX_WS_TEXT_CHARS:
+                            await session.send_realtime_input(text=text.strip())
 
             async def send_browser():
                 nonlocal pending_user, pending_assistant
@@ -546,6 +771,12 @@ async def live_teacher(websocket: WebSocket):
             await websocket.send_json({"type": "error", "code": "live_error", "message": "Live teacher paused. The connection will try again automatically."})
         except Exception:
             pass
+    finally:
+        remaining = _live_connections.get(user["id"], 1) - 1
+        if remaining > 0:
+            _live_connections[user["id"]] = remaining
+        else:
+            _live_connections.pop(user["id"], None)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -578,7 +809,7 @@ def register(
     if not normalized:
         return RedirectResponse("/register?error=Use a valid email or international phone number", status_code=303)
     full_name = " ".join(full_name.split())
-    standard = " ".join(standard.split())
+    standard = normalize_standard(standard)
     normalized_phone = normalize_phone(phone)
     if len(full_name) < 2 or len(full_name) > 80:
         return RedirectResponse("/register?error=Enter your full name", status_code=303)
@@ -591,8 +822,8 @@ def register(
             age_range = ""
     if age_range not in AGE_RANGE_OPTIONS:
         return RedirectResponse("/register?error=Choose your age range", status_code=303)
-    if not standard or len(standard) > 80:
-        return RedirectResponse("/register?error=Enter your standard or grade", status_code=303)
+    if not standard:
+        return RedirectResponse("/register?error=Study Buddy is currently for Standards 1 to 9", status_code=303)
     if not normalized_phone:
         return RedirectResponse("/register?error=Use a valid international phone number for verification", status_code=303)
     enforce_rate_limit(request, "auth", identity=f"registration:{normalized_phone}")
@@ -824,9 +1055,9 @@ def update_profile(
     if not user:
         return RedirectResponse("/login?error=Please+log+in+first&next=/profile", status_code=303)
     full_name = " ".join(full_name.split())
-    standard = " ".join(standard.split())
-    if len(full_name) < 2 or len(full_name) > 80 or age_range not in AGE_RANGE_OPTIONS or not standard or len(standard) > 80:
-        return RedirectResponse("/profile?message=Please complete all profile fields", status_code=303)
+    standard = normalize_standard(standard)
+    if len(full_name) < 2 or len(full_name) > 80 or age_range not in AGE_RANGE_OPTIONS or not standard:
+        return RedirectResponse("/profile?message=Choose a Standard from 1 to 9", status_code=303)
     with db() as connection:
         connection.execute(
             "UPDATE users SET full_name = ?, age_range = ?, standard = ? WHERE id = ?",
@@ -867,15 +1098,19 @@ def dashboard(request: Request, study_session: str | None = Cookie(default=None)
             "SELECT title, kind, created_at FROM study_items WHERE user_id = ? ORDER BY id DESC", (user["id"],)
         ).fetchall()
         stats = connection.execute(
-            "SELECT (SELECT COUNT(*) FROM chat_messages WHERE user_id = ?) messages, (SELECT COUNT(*) FROM documents WHERE user_id = ?) documents, (SELECT COUNT(*) FROM quizzes WHERE user_id = ?) quizzes, (SELECT COALESCE(AVG(score * 100.0 / NULLIF(json_array_length(questions_json), 0)), 0) FROM quizzes WHERE user_id = ? AND score IS NOT NULL) accuracy",
-            (user["id"], user["id"], user["id"], user["id"]),
+            "SELECT (SELECT COUNT(*) FROM chat_messages WHERE user_id = ?) messages, (SELECT COUNT(*) FROM documents WHERE user_id = ?) documents, (SELECT COUNT(*) FROM quizzes WHERE user_id = ?) quizzes, (SELECT COALESCE(AVG(score * 100.0 / NULLIF(json_array_length(questions_json), 0)), 0) FROM quizzes WHERE user_id = ? AND score IS NOT NULL) accuracy, (SELECT COUNT(*) FROM review_cards WHERE user_id = ? AND due_at <= ?) due_reviews",
+            (user["id"], user["id"], user["id"], user["id"], user["id"], utc_now()),
         ).fetchone()
         quiz_history = connection.execute(
             "SELECT id, title, score, json_array_length(questions_json) question_count, created_at FROM quizzes WHERE user_id = ? ORDER BY id DESC LIMIT 6",
             (user["id"],),
         ).fetchall()
+        due_reviews = connection.execute(
+            "SELECT id, prompt, answer, due_at FROM review_cards WHERE user_id = ? AND due_at <= ? ORDER BY due_at LIMIT 5",
+            (user["id"], utc_now()),
+        ).fetchall()
     return templates.TemplateResponse(
-        request, "pages/dashboard4.html", {"user": user, "items": items, "messages": user_chat(user["id"]), "stats": stats, "quiz_history": quiz_history, "provider_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY"))}
+        request, "pages/dashboard4.html", {"user": user, "items": items, "messages": user_chat(user["id"]), "stats": stats, "quiz_history": quiz_history, "due_reviews": due_reviews, "show_onboarding": not bool(user["onboarding_completed"]), "provider_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY"))}
     )
 
 
@@ -942,21 +1177,108 @@ def rag_page(request: Request, study_session: str | None = Cookie(default=None))
         documents = connection.execute(
             "SELECT id, filename, created_at FROM documents WHERE user_id = ? ORDER BY id DESC", (user["id"],)
         ).fetchall()
+    conversation = get_or_create_conversation(user["id"], mode="document")
+    if conversation["title"] == "New document study":
+        attach_legacy_documents(user["id"], conversation["id"])
+    conversations = user_conversations(user["id"], "document")
     return templates.TemplateResponse(
-        request, "pages/rag_workspace.html", {"user": user, "documents": documents, "messages": user_chat(user["id"])}
+        request,
+        "pages/rag_workspace.html",
+        {
+            "user": user,
+            "documents": documents,
+            "messages": user_chat(user["id"], conversation_id=conversation["id"]),
+            "conversations": conversations,
+            "active_conversation_id": conversation["id"],
+        },
     )
 
 
 @app.get("/api/chat")
-def get_chat(study_session: str | None = Cookie(default=None)):
+def get_chat(conversation_id: int | None = None, study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
-    return {"messages": [dict(message) for message in user_chat(user["id"])]}
+    if conversation_id and not user_conversation(user["id"], conversation_id):
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+    return {"messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
+
+
+@app.get("/api/conversations")
+def list_conversations(mode: str = "document", study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    if mode not in {"general", "document", "voice"}:
+        raise HTTPException(status_code=400, detail="invalid_conversation_mode")
+    conversations = user_conversations(user["id"], mode)
+    if not conversations and mode == "document":
+        conversations = [get_or_create_conversation(user["id"], mode=mode)]
+    return {"conversations": [dict(conversation) for conversation in conversations]}
+
+
+@app.post("/api/onboarding/complete")
+def complete_onboarding(study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    with db() as connection:
+        connection.execute("UPDATE users SET onboarding_completed = 1 WHERE id = ?", (user["id"],))
+    return {"completed": True}
+
+
+@app.post("/api/conversations")
+def create_conversation(request: Request, title: str = Form("New study"), mode: str = Form("document"), study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    enforce_rate_limit(request, "chat", str(user["id"]))
+    if mode not in {"general", "document", "voice"}:
+        raise HTTPException(status_code=400, detail="invalid_conversation_mode")
+    clean_title = title.strip()[:80] or "New study"
+    now = utc_now()
+    with db() as connection:
+        cursor = connection.execute(
+            "INSERT INTO conversations (user_id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (user["id"], clean_title, mode, now, now),
+        )
+        conversation = connection.execute("SELECT * FROM conversations WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return {"conversation": dict(conversation)}
+
+
+@app.patch("/api/conversations/{conversation_id}")
+def rename_conversation(conversation_id: int, title: str = Form(...), study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    clean_title = title.strip()[:80]
+    if not clean_title:
+        raise HTTPException(status_code=400, detail="conversation_title_required")
+    with db() as connection:
+        cursor = connection.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (clean_title, utc_now(), conversation_id, user["id"]),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="conversation_not_found")
+        conversation = connection.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+    return {"conversation": dict(conversation)}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def delete_conversation(conversation_id: int, study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    with db() as connection:
+        cursor = connection.execute("DELETE FROM conversations WHERE id = ? AND user_id = ?", (conversation_id, user["id"]))
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+    return {"deleted": True, "conversation_id": conversation_id}
 
 
 @app.post("/api/chat")
-def send_chat(request: Request, message: str = Form(...), study_session: str | None = Cookie(default=None)):
+def send_chat(request: Request, message: str = Form(...), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
@@ -968,16 +1290,12 @@ def send_chat(request: Request, message: str = Form(...), study_session: str | N
         raise HTTPException(status_code=413, detail="message_too_long")
     # Plain chatbot path: no uploaded-document context is injected.
     response_text = ai_answer(clean_message)
-    with db() as connection:
-        connection.executemany(
-            "INSERT INTO chat_messages (user_id, role, message, created_at) VALUES (?, ?, ?, ?)",
-            [(user["id"], "user", clean_message, utc_now()), (user["id"], "assistant", response_text, utc_now())],
-        )
-    return {"messages": [dict(message) for message in user_chat(user["id"])]}
+    conversation_id = save_chat_turn(user["id"], clean_message, response_text, conversation_id, "general")
+    return {"conversation_id": conversation_id, "messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
 
 
 @app.post("/api/rag/chat")
-def send_rag_chat(request: Request, message: str = Form(...), study_session: str | None = Cookie(default=None)):
+def send_rag_chat(request: Request, message: str = Form(...), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
@@ -987,21 +1305,22 @@ def send_rag_chat(request: Request, message: str = Form(...), study_session: str
         raise HTTPException(status_code=400, detail="message_required")
     if len(clean_message) > MAX_MESSAGE_CHARS:
         raise HTTPException(status_code=413, detail="message_too_long")
+    conversation = get_or_create_conversation(user["id"], conversation_id, "document")
+    if conversation["title"] == "New document study":
+        attach_legacy_documents(user["id"], conversation["id"])
     try:
-        retrieved_context = context_for_user(user["id"], clean_message)
+        retrieved_context = context_for_user(user["id"], clean_message, conversation["id"])
     except RuntimeError:
         raise HTTPException(status_code=503, detail="rag_embedding_unavailable")
+    if not retrieved_context:
+        raise HTTPException(status_code=400, detail="upload_pdf_first")
     response_text = ai_answer(clean_message, retrieved_context)
-    with db() as connection:
-        connection.executemany(
-            "INSERT INTO chat_messages (user_id, role, message, created_at) VALUES (?, ?, ?, ?)",
-            [(user["id"], "user", clean_message, utc_now()), (user["id"], "assistant", response_text, utc_now())],
-        )
-    return {"messages": [dict(message) for message in user_chat(user["id"])]}
+    conversation_id = save_chat_turn(user["id"], clean_message, response_text, conversation["id"], "document")
+    return {"conversation_id": conversation_id, "messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
 
 
 @app.post("/api/documents")
-async def upload_document(request: Request, file: UploadFile = File(...), study_session: str | None = Cookie(default=None)):
+async def upload_document(request: Request, file: UploadFile = File(...), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
@@ -1025,9 +1344,24 @@ async def upload_document(request: Request, file: UploadFile = File(...), study_
         text = ""
     if not text.strip():
         return {"error": "could_not_extract_text"}
+    conversation = get_or_create_conversation(user["id"], conversation_id, "document")
     with db() as connection:
+        document_totals = connection.execute(
+            "SELECT COUNT(*) document_count, COALESCE(SUM(LENGTH(content)), 0) stored_chars FROM documents WHERE user_id = ?",
+            (user["id"],),
+        ).fetchone()
+        if document_totals["document_count"] >= MAX_DOCUMENTS_PER_USER:
+            raise HTTPException(status_code=413, detail="document_limit_reached")
+        if document_totals["stored_chars"] + min(len(text), 2_000_000) > MAX_DOCUMENT_STORAGE_CHARS:
+            raise HTTPException(status_code=413, detail="document_storage_limit_reached")
         cursor = connection.execute("INSERT INTO documents (user_id, filename, content, created_at) VALUES (?, ?, ?, ?)", (user["id"], file.filename, text[:2_000_000], utc_now()))
-    return {"id": cursor.lastrowid, "filename": file.filename, "characters": len(text)}
+        document_id = cursor.lastrowid
+    with db() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO conversation_documents (conversation_id, document_id, created_at) VALUES (?, ?, ?)",
+            (conversation["id"], document_id, utc_now()),
+        )
+    return {"id": document_id, "filename": file.filename, "characters": len(text), "conversation_id": conversation["id"]}
 
 
 @app.get("/api/documents")
@@ -1053,19 +1387,22 @@ def delete_document(document_id: int, study_session: str | None = Cookie(default
 
 
 @app.post("/api/quiz/generate")
-def generate_quiz(request: Request, study_session: str | None = Cookie(default=None)):
+def generate_quiz(request: Request, conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
     enforce_rate_limit(request, "quiz", str(user["id"]))
+    conversation = get_or_create_conversation(user["id"], conversation_id, "document") if conversation_id else None
     try:
-        context = context_for_user(user["id"])
+        context = context_for_user(user["id"], conversation_id=conversation["id"]) if conversation else context_for_user(user["id"])
     except RuntimeError:
         raise HTTPException(status_code=503, detail="rag_embedding_unavailable")
     if not context:
         raise HTTPException(status_code=400, detail="upload_pdf_first")
-    prompt = "Create 3 multiple-choice study questions from the supplied material. Return JSON array with question, options (4 strings), answer (0-3), explanation. Material:\n" + context
-    raw = ai_answer("Create the quiz as JSON only.", context=context + "\n\n" + prompt)
+    raw = ai_answer(
+        "Create the quiz as JSON only. Return a JSON array with question, options (4 strings), answer (0-3), and explanation.",
+        context=context,
+    )
     questions = []
     try:
         candidate = raw[raw.find("["):raw.rfind("]") + 1]
@@ -1073,13 +1410,35 @@ def generate_quiz(request: Request, study_session: str | None = Cookie(default=N
         if not isinstance(questions, list) or not questions or len(questions) > 10:
             raise ValueError("invalid quiz list")
         for question in questions:
-            if not isinstance(question, dict) or not isinstance(question.get("question"), str) or not isinstance(question.get("options"), list) or len(question["options"]) != 4 or int(question.get("answer", -1)) not in range(4):
+            if (
+                not isinstance(question, dict)
+                or not isinstance(question.get("question"), str)
+                or not question["question"].strip()
+                or not isinstance(question.get("options"), list)
+                or len(question["options"]) != 4
+                or not all(isinstance(option, str) and option.strip() for option in question["options"])
+                or int(question.get("answer", -1)) not in range(4)
+                or not isinstance(question.get("explanation", ""), str)
+            ):
                 raise ValueError("invalid quiz question")
     except (ValueError, json.JSONDecodeError):
         raise HTTPException(status_code=502, detail="quiz_generation_failed")
+    topic = conversation["title"] if conversation else "Document study"
+    document_id = None
+    if conversation:
+        with db() as connection:
+            document_id = connection.execute(
+                "SELECT document_id FROM conversation_documents WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
+                (conversation["id"],),
+            ).fetchone()
+        document_id = document_id["document_id"] if document_id else None
     with db() as connection:
-        cursor = connection.execute("INSERT INTO quizzes (user_id, title, questions_json, created_at) VALUES (?, ?, ?, ?)", (user["id"], "Quick review", json.dumps(questions), utc_now()))
-    return {"quiz_id": cursor.lastrowid, "title": "Quick review", "questions": questions}
+        cursor = connection.execute("INSERT INTO quizzes (user_id, title, topic, document_id, questions_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user["id"], "Quick review", topic, document_id, json.dumps(questions), utc_now()))
+    public_questions = [
+        {"question": question["question"], "options": question["options"]}
+        for question in questions
+    ]
+    return {"quiz_id": cursor.lastrowid, "title": "Quick review", "questions": public_questions}
 
 
 @app.post("/api/quiz/{quiz_id}/submit")
@@ -1096,11 +1455,57 @@ def submit_quiz(quiz_id: int, answers: str = Form(...), study_session: str | Non
             submitted = json.loads(answers)
             if not isinstance(submitted, list) or len(submitted) != len(questions):
                 raise ValueError("answer count mismatch")
+            answer_hash = hashlib.sha256(json.dumps(submitted, separators=(",", ":")).encode()).hexdigest()
+            previous_attempt = connection.execute(
+                "SELECT score, result_json, review_cards_created FROM quiz_attempts WHERE quiz_id = ? AND user_id = ? AND answer_hash = ?",
+                (quiz_id, user["id"], answer_hash),
+            ).fetchone()
+            if previous_attempt:
+                cached = json.loads(previous_attempt["result_json"])
+                return {
+                    "score": previous_attempt["score"],
+                    "total": len(questions),
+                    "review_cards_created": 0,
+                    "cached": True,
+                    "results": cached,
+                }
             score = sum(int(item.get("answer", -1)) == int(submitted[index]) for index, item in enumerate(questions))
         except (ValueError, TypeError, json.JSONDecodeError, KeyError):
             raise HTTPException(status_code=400, detail="invalid_answers")
         connection.execute("UPDATE quizzes SET score = ? WHERE id = ?", (score, quiz_id))
-    return {"score": score, "total": len(questions)}
+        review_cards_created = 0
+        for index, item in enumerate(questions):
+            if int(item.get("answer", -1)) == int(submitted[index]):
+                continue
+            prompt = str(item.get("question", "Review this question"))[:MAX_MESSAGE_CHARS]
+            answer_text = str(item.get("explanation", "Review the source material for this concept."))[:MAX_MESSAGE_CHARS]
+            existing = connection.execute(
+                "SELECT id FROM review_cards WHERE user_id = ? AND prompt = ? AND due_at > ? LIMIT 1",
+                (user["id"], prompt, utc_now()),
+            ).fetchone()
+            if not existing:
+                connection.execute(
+                    "INSERT INTO review_cards (user_id, prompt, answer, due_at, interval_days, repetitions, topic, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user["id"], prompt, answer_text, (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), 1, 0, quiz["topic"], utc_now()),
+                )
+                review_cards_created += 1
+    record_learning_event(
+        user["id"],
+        "quiz_completed",
+        quiz["topic"],
+        score / len(questions) if questions else 0,
+        {"quiz_id": quiz_id, "review_cards_created": review_cards_created},
+    )
+    results = [
+        {"correct_answer": int(item.get("answer", -1)), "explanation": item.get("explanation", "")}
+        for item in questions
+    ]
+    with db() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO quiz_attempts (quiz_id, user_id, answer_hash, score, result_json, review_cards_created, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (quiz_id, user["id"], answer_hash, score, json.dumps(results), review_cards_created, utc_now()),
+        )
+    return {"score": score, "total": len(questions), "review_cards_created": review_cards_created, "cached": False, "results": results}
 
 
 @app.get("/api/reviews")
@@ -1109,15 +1514,56 @@ def reviews(study_session: str | None = Cookie(default=None)):
     if not user:
         api_auth_error()
     with db() as connection:
-        rows = connection.execute("SELECT id, prompt, answer, due_at, interval_days FROM review_cards WHERE user_id = ? ORDER BY due_at", (user["id"],)).fetchall()
+        rows = connection.execute("SELECT id, prompt, answer, due_at, interval_days, repetitions, topic, completed_at FROM review_cards WHERE user_id = ? ORDER BY due_at", (user["id"],)).fetchall()
     return {"reviews": [dict(row) for row in rows]}
 
 
-@app.post("/api/reviews")
-def create_review(prompt: str = Form(...), answer: str = Form(...), study_session: str | None = Cookie(default=None)):
+@app.get("/api/learning/progress")
+def learning_progress(study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
+    with db() as connection:
+        topics = connection.execute(
+            "SELECT topic, COUNT(*) attempts, ROUND(AVG(score) * 100, 1) average_score, MAX(created_at) last_seen FROM learning_events WHERE user_id = ? GROUP BY topic ORDER BY last_seen DESC",
+            (user["id"],),
+        ).fetchall()
+        due = connection.execute(
+            "SELECT id, prompt, answer, due_at, interval_days FROM review_cards WHERE user_id = ? AND due_at <= ? ORDER BY due_at LIMIT 20",
+            (user["id"], utc_now()),
+        ).fetchall()
+    return {"topics": [dict(topic) for topic in topics], "due_reviews": [dict(card) for card in due]}
+
+
+@app.post("/api/reviews/{review_id}/complete")
+def complete_review(review_id: int, request: Request, remembered: bool = Form(True), study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    enforce_rate_limit(request, "review", str(user["id"]))
+    with db() as connection:
+        card = connection.execute(
+            "SELECT * FROM review_cards WHERE id = ? AND user_id = ?", (review_id, user["id"])
+        ).fetchone()
+        if not card:
+            raise HTTPException(status_code=404, detail="review_not_found")
+        intervals = (1, 3, 7, 14, 30)
+        repetitions = min(int(card["repetitions"] or 0) + 1, len(intervals)) if remembered else 0
+        interval_days = intervals[repetitions - 1] if remembered else 1
+        due_at = (datetime.now(timezone.utc) + timedelta(days=interval_days)).isoformat()
+        connection.execute(
+            "UPDATE review_cards SET due_at = ?, interval_days = ?, repetitions = ?, completed_at = ? WHERE id = ? AND user_id = ?",
+            (due_at, interval_days, repetitions, utc_now(), review_id, user["id"]),
+        )
+    return {"review_id": review_id, "remembered": remembered, "due_at": due_at, "interval_days": interval_days}
+
+
+@app.post("/api/reviews")
+def create_review(request: Request, prompt: str = Form(...), answer: str = Form(...), study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    enforce_rate_limit(request, "review", str(user["id"]))
     if not prompt.strip() or not answer.strip() or len(prompt) > MAX_MESSAGE_CHARS or len(answer) > MAX_MESSAGE_CHARS:
         raise HTTPException(status_code=400, detail="review_content_invalid")
     due_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()

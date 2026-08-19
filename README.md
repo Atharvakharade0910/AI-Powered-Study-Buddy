@@ -72,3 +72,15 @@ The default database is `data/study_buddy.db`. Uploaded PDF text and prompts are
 ## Production notes
 
 The local app intentionally uses SQLite and an in-process rate limiter. A production deployment should use PostgreSQL, HTTPS, `COOKIE_SECURE=1`, a shared rate-limit store, database migrations, password reset delivery, structured observability, and a malware/document scanning pipeline.
+
+Document study fails closed when no usable document context is available; it does not silently fall back to general chat. Stored documents are bounded to 50 per account and 20 million extracted characters per account. Chat history returned to the browser is bounded to the most recent 100 messages.
+
+The Gemini Live WebSocket limits each account to one active session, validates audio payloads, caps individual audio packets, and applies a per-connection message budget. The browser surfaces provider, authentication, rate-limit, upload, and retrieval errors instead of treating non-success responses as empty results.
+
+Quiz answers and explanations are kept server-side until submission. The initial quiz response contains only questions and options; grading returns the correct answers and explanations after the attempt.
+
+New accounts receive a one-time dashboard welcome tour explaining the General Teacher, Document Study, Voice Teacher, quizzes, and adaptive review flow. The tour attempts a short browser voice introduction, includes a manual voice fallback for autoplay restrictions, and can be replayed from the dashboard through “How it works.”
+
+## Supported learners
+
+Study Buddy is currently designed for learners in Standard 1 through Standard 9. New registrations and profile updates accept only Standards 1–9. Existing account records are preserved during this product-scope change, but their next profile update must use a supported Standard.
