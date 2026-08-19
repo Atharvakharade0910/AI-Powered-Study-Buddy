@@ -50,6 +50,23 @@ def test_public_pages_and_health() -> None:
     assert client.get("/").status_code == 200
     assert client.get("/register").status_code == 200
     assert client.get("/api/health").json() == {"status": "ok", "service": "study-buddy"}
+    readiness = client.get("/api/ready")
+    assert readiness.status_code == 200
+    assert readiness.json()["status"] == "ready"
+
+
+def test_production_verification_page_selects_payload_json(monkeypatch) -> None:
+    token = "production-page-token"
+    with app.db() as connection:
+        connection.execute(
+            "INSERT INTO registration_challenges (token, phone, code_hash, payload_json, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (token, "+919876543299", "hash", json.dumps({"kind": "registration"}), "2099-01-01T00:00:00+00:00", app.utc_now()),
+        )
+    monkeypatch.setattr(app, "PHONE_VERIFICATION_DEV_MODE", False)
+    monkeypatch.setattr(app, "SMS_PROVIDER", "twilio")
+    response = client.get(f"/verify-phone?token={token}")
+    assert response.status_code == 200
+    assert "Available in" in response.text
 
 
 def test_supported_standards_are_one_through_nine() -> None:

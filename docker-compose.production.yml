@@ -1,0 +1,33 @@
+services:
+  study-buddy:
+    build: .
+    env_file:
+      - .env.production
+    environment:
+      APP_ENV: production
+      COOKIE_SECURE: "1"
+      REDIS_URL: redis://redis:6379/0
+    expose:
+      - "8000"
+    volumes:
+      - study_buddy_data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - study_buddy_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+volumes:
+  study_buddy_data:
+  study_buddy_redis:

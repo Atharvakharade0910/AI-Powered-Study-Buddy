@@ -73,6 +73,21 @@ The default database is `data/study_buddy.db`. Uploaded PDF text and prompts are
 
 The local app intentionally uses SQLite and an in-process rate limiter. A production deployment should use PostgreSQL, HTTPS, `COOKIE_SECURE=1`, a shared rate-limit store, database migrations, password reset delivery, structured observability, and a malware/document scanning pipeline.
 
+The repository now includes a production-oriented Docker image, Docker Compose files, a CI workflow, Redis-backed rate limiting when `REDIS_URL` is configured, a `/api/ready` dependency check, and bounded PDF extraction workers. The default Docker image intentionally runs one application worker because the current persistence layer is SQLite. Do not add multiple application workers or replicas until the SQLite store has been migrated to PostgreSQL with a tested migration path and shared document storage.
+
+For the current controlled deployment path:
+
+```powershell
+Copy-Item .env.example .env
+# Fill in the AI and Twilio production values, then set APP_ENV=production,
+# PHONE_VERIFICATION_DEV_MODE=0, SMS_PROVIDER=twilio, and COOKIE_SECURE=1.
+docker compose -f docker-compose.production.yml up --build -d
+```
+
+The compose setup provides Redis for shared rate limits. HTTPS must be terminated by a reverse proxy or managed ingress in front of the container; `COOKIE_SECURE=1` requires that browser traffic is actually HTTPS.
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the supported single-container runbook and the remaining PostgreSQL/object-storage migration gates before horizontal scaling.
+
 Document study fails closed when no usable document context is available; it does not silently fall back to general chat. Stored documents are bounded to 50 per account and 20 million extracted characters per account. Chat history returned to the browser is bounded to the most recent 100 messages.
 
 The Gemini Live WebSocket limits each account to one active session, validates audio payloads, caps individual audio packets, and applies a per-connection message budget. The browser surfaces provider, authentication, rate-limit, upload, and retrieval errors instead of treating non-success responses as empty results.

@@ -13,6 +13,7 @@ import re
 import secrets
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -74,6 +75,8 @@ if APP_ENV in {"production", "prod"} and os.getenv("COOKIE_SECURE", "0") != "1":
 _rate_limit_hits: dict[tuple[str, str], list[float]] = {}
 _live_connections: dict[int, int] = {}
 _embedding_model = None
+_redis_client = None
+_document_executor = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("DOCUMENT_WORKERS", "2"))))
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,20}$")
 AGE_RANGE_OPTIONS = ("Under 13", "13–15", "16–17", "18–24", "25+")
@@ -98,6 +101,7 @@ def db() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
     return connection
 
 
@@ -548,6 +552,21 @@ def document_chunks(filename: str, content: str) -> list[str]:
     return chunks
 
 
+def extract_pdf_text(raw: bytes, filename: str) -> str:
+    """Extract PDF text in a bounded worker pool instead of blocking the event loop."""
+    try:
+        import fitz
+
+        document = fitz.open(stream=raw, filetype="pdf")
+        return "\n\n".join(
+            f"[Source: {filename}, page {page_number}]\n{page.get_text()}"
+            for page_number, page in enumerate(document, start=1)
+        )
+    except Exception as error:
+        logger.warning("PDF extraction failed: %s", type(error).__name__)
+        return ""
+
+
 def semantic_scores(query: str, chunks: list[str]) -> list[float]:
     global _embedding_model
     if not chunks:
@@ -616,8 +635,47 @@ def api_auth_error() -> None:
     raise HTTPException(status_code=401, detail="authentication_required")
 
 
+def shared_redis():
+    """Return a shared Redis client when configured; development stays local-first."""
+    global _redis_client
+    redis_url = os.getenv("REDIS_URL", "").strip()
+    if not redis_url:
+        return None
+    if _redis_client is False:
+        return None
+    if _redis_client is None:
+        try:
+            import redis
+
+            client = redis.Redis.from_url(redis_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
+            client.ping()
+            _redis_client = client
+        except Exception as error:
+            logger.warning("Shared Redis unavailable: %s", type(error).__name__)
+            _redis_client = False
+    return _redis_client
+
+
 def enforce_rate_limit(request: Request, bucket: str, identity: str = "anonymous") -> None:
     limit, window = RATE_LIMITS[bucket]
+    client = shared_redis()
+    if os.getenv("REDIS_URL", "").strip() and client is None and APP_ENV in {"production", "prod"}:
+        raise HTTPException(status_code=503, detail="rate_limit_store_unavailable")
+    if client is not None:
+        key = f"study-buddy:rate:{bucket}:{request.client.host if request.client else 'unknown'}:{identity}"
+        try:
+            count = int(client.incr(key))
+            if count == 1:
+                client.expire(key, window)
+            if count > limit:
+                raise HTTPException(status_code=429, detail="rate_limit_exceeded", headers={"Retry-After": str(window)})
+            return
+        except HTTPException:
+            raise
+        except Exception as error:
+            logger.warning("Shared rate limiter failed: %s", type(error).__name__)
+            if APP_ENV in {"production", "prod"}:
+                raise HTTPException(status_code=503, detail="rate_limit_store_unavailable")
     key = (bucket, f"{request.client.host if request.client else 'unknown'}:{identity}")
     now = time.monotonic()
     hits = [stamp for stamp in _rate_limit_hits.get(key, []) if now - stamp < window]
@@ -657,6 +715,26 @@ async def security_middleware(request: Request, call_next):
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "study-buddy"}
+
+
+@app.get("/api/ready")
+def readiness() -> dict[str, object]:
+    checks: dict[str, str] = {}
+    try:
+        with db() as connection:
+            connection.execute("SELECT 1").fetchone()
+        checks["database"] = "ok"
+    except Exception as error:
+        logger.error("Readiness database check failed: %s", type(error).__name__)
+        checks["database"] = "failed"
+    if os.getenv("REDIS_URL", "").strip():
+        checks["redis"] = "ok" if shared_redis() is not None else "failed"
+    else:
+        checks["redis"] = "not_configured"
+    ready = checks["database"] == "ok" and checks["redis"] != "failed"
+    if not ready:
+        raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
+    return {"status": "ready", "checks": checks}
 
 
 @app.websocket("/ws/live")
@@ -878,7 +956,7 @@ def verify_phone_page(request: Request, token: str = "", error: str | None = Non
     elif token:
         with db() as connection:
             challenge = connection.execute(
-                "SELECT phone, last_sent_at FROM registration_challenges WHERE token = ?", (token,)
+                "SELECT phone, last_sent_at, payload_json FROM registration_challenges WHERE token = ?", (token,)
             ).fetchone()
         if challenge:
             masked = mask_phone(challenge["phone"])
@@ -1332,16 +1410,8 @@ async def upload_document(request: Request, file: UploadFile = File(...), conver
         raise HTTPException(status_code=413, detail="pdf_too_large")
     if not raw.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="invalid_pdf")
-    text = ""
-    try:
-        import fitz
-        document = fitz.open(stream=raw, filetype="pdf")
-        text = "\n\n".join(
-            f"[Source: {file.filename}, page {page_number}]\n{page.get_text()}"
-            for page_number, page in enumerate(document, start=1)
-        )
-    except Exception:
-        text = ""
+    loop = asyncio.get_running_loop()
+    text = await loop.run_in_executor(_document_executor, extract_pdf_text, raw, file.filename)
     if not text.strip():
         return {"error": "could_not_extract_text"}
     conversation = get_or_create_conversation(user["id"], conversation_id, "document")
