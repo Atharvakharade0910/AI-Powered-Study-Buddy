@@ -33,3 +33,14 @@ The production stack now uses PostgreSQL and Redis, but horizontal scaling still
 4. Backup restoration, load, browser end-to-end, and provider-contract tests.
 
 The production guard refuses to start without PostgreSQL and Redis. This prevents a deployment that appears scalable while silently falling back to local-only persistence or rate-limit state.
+
+## Public deployment with Render
+
+The repository includes `render.yaml` for a public Docker deployment with a Render web service, managed PostgreSQL, and Render Key Value. Render automatically provides an HTTPS `onrender.com` URL and can redeploy the configured branch after successful CI checks.
+
+1. Open the Render Blueprint flow and connect the GitHub repository.
+2. Select the `agent/study-buddy-twilio` branch, or change `branch` in `render.yaml` before creating the Blueprint.
+3. Enter the values for every environment variable marked `sync: false`, especially `GEMINI_API_KEY`, Twilio credentials, and object-storage credentials.
+4. Create the Blueprint and wait for `/api/ready` to pass.
+
+The Blueprint uses free resources for an initial public preview. Free Render Postgres databases can expire and do not include backups, while free Key Value instances are in-memory and can lose cache/rate-limit state on restart. For a real multi-user production launch, upgrade the web service and datastores, configure S3-compatible object storage for uploaded PDFs, and enable backups before sharing the URL widely.

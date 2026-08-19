@@ -1,0 +1,69 @@
+services:
+  - type: web
+    name: ai-powered-study-buddy
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: agent/study-buddy-twilio
+    autoDeployTrigger: checksPass
+    healthCheckPath: /api/ready
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: PHONE_VERIFICATION_DEV_MODE
+        value: "0"
+      - key: SMS_PROVIDER
+        value: twilio
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
+      - key: GEMINI_LIVE_MODEL
+        value: gemini-3.1-flash-live-preview
+      - key: DATABASE_URL
+        fromDatabase:
+          name: study-buddy-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: study-buddy-redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_API_KEY_SID
+        sync: false
+      - key: TWILIO_API_KEY_SECRET
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_PHONE
+        sync: false
+      - key: OBJECT_STORAGE_BUCKET
+        sync: false
+      - key: OBJECT_STORAGE_ENDPOINT
+        sync: false
+      - key: OBJECT_STORAGE_REGION
+        value: auto
+      - key: OBJECT_STORAGE_ACCESS_KEY
+        sync: false
+      - key: OBJECT_STORAGE_SECRET_KEY
+        sync: false
+
+  - type: keyvalue
+    name: study-buddy-redis
+    plan: free
+    region: singapore
+    ipAllowList: []
+
+databases:
+  - name: study-buddy-postgres
+    plan: free
+    region: singapore
+    postgresMajorVersion: "16"
