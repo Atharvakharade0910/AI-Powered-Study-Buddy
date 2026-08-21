@@ -72,14 +72,17 @@ def test_production_verification_page_selects_payload_json(monkeypatch) -> None:
     assert "Available in" in response.text
 
 
-def test_supported_standards_are_one_through_nine() -> None:
+def test_supported_standards_are_one_through_twelve() -> None:
     assert app.normalize_standard("Standard 1") == "Standard 1"
     assert app.normalize_standard("grade 9") == "Standard 9"
-    assert app.normalize_standard("Standard 10") is None
+    assert app.normalize_standard("Standard 10") == "Standard 10"
+    assert app.normalize_standard("Grade 12") == "Standard 12"
+    assert app.normalize_board("CBSE") == "CBSE"
+    assert app.normalize_board("state board") == "State Board"
     assert app.normalize_standard("FY BSc") is None
 
 
-def test_registration_rejects_standard_ten() -> None:
+def test_registration_accepts_standard_ten() -> None:
     response = client.post(
         "/register",
         data={
@@ -94,7 +97,7 @@ def test_registration_rejects_standard_ten() -> None:
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "Standards+1+to+9" in response.headers["location"] or "Standards%201%20to%209" in response.headers["location"]
+    assert "/verify-phone?token=" in response.headers["location"]
 
 
 def test_protected_pages_redirect_without_session() -> None:
@@ -229,6 +232,25 @@ def test_authenticated_pages_render_after_login() -> None:
     assert authenticated.get("/voice").status_code == 200
 
 
+def test_learning_profile_selection_persists_board_and_class() -> None:
+    profile_client = TestClient(app.app)
+    register_verified(profile_client, "learning-profile@example.com", "+919876543230")
+    csrf = {"X-CSRF-Token": profile_client.cookies["csrf_token"]}
+    saved = profile_client.post(
+        "/api/profile/learning",
+        data={"standard": "Standard 12", "board": "State Board"},
+        headers=csrf,
+    )
+    assert saved.json() == {"saved": True, "standard": "Standard 12", "board": "State Board"}
+    with app.db() as connection:
+        user = connection.execute(
+            "SELECT standard, board FROM users WHERE identifier = ?",
+            ("learning-profile@example.com",),
+        ).fetchone()
+    assert tuple(user) == ("Standard 12", "State Board")
+    assert "State Board" in profile_client.get("/dashboard").text
+
+
 def test_profile_update_and_phone_change_require_verification() -> None:
     profile_client = TestClient(app.app)
     register_verified(profile_client, "profile@example.com", "+919876543210")
@@ -343,7 +365,8 @@ def test_plain_chat_and_rag_chat_have_separate_context_paths(monkeypatch) -> Non
     csrf = {"X-CSRF-Token": chat_client.cookies["csrf_token"]}
     assert chat_client.post("/api/chat", data={"message": "What is energy?"}, headers=csrf).status_code == 200
     assert chat_client.post("/api/rag/chat", data={"message": "What do mitochondria do?"}, headers=csrf).status_code == 200
-    assert calls[0][1] == ""
+    assert "CBSE" in calls[0][1]
+    assert "Standard 9" in calls[0][1]
     assert "biology.pdf" in calls[1][1]
     assert "page 2" in calls[1][1]
 

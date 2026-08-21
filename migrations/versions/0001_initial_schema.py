@@ -10,7 +10,7 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("""
-    CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY, identifier TEXT NOT NULL UNIQUE, identifier_type TEXT NOT NULL CHECK(identifier_type IN ('email','phone')), password_hash TEXT NOT NULL, full_name TEXT, age INTEGER, standard TEXT, age_range TEXT, phone TEXT, phone_verified INTEGER NOT NULL DEFAULT 0, is_admin INTEGER NOT NULL DEFAULT 0, onboarding_completed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY, identifier TEXT NOT NULL UNIQUE, identifier_type TEXT NOT NULL CHECK(identifier_type IN ('email','phone')), password_hash TEXT NOT NULL, full_name TEXT, age INTEGER, standard TEXT, board TEXT, age_range TEXT, phone TEXT, phone_verified INTEGER NOT NULL DEFAULT 0, is_admin INTEGER NOT NULL DEFAULT 0, onboarding_completed INTEGER NOT NULL DEFAULT 0, learning_profile_completed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS registration_challenges (id BIGSERIAL PRIMARY KEY, token TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, code_hash TEXT NOT NULL, payload_json TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, resend_count INTEGER NOT NULL DEFAULT 0, last_sent_at TEXT, dev_code TEXT, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS study_items (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'note', created_at TEXT NOT NULL);

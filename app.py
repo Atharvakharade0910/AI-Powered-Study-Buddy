@@ -87,7 +87,8 @@ _document_executor = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("DOCUME
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,20}$")
 AGE_RANGE_OPTIONS = ("Under 13", "13–15", "16–17", "18–24", "25+")
-STANDARD_OPTIONS = tuple(f"Standard {number}" for number in range(1, 10))
+BOARD_OPTIONS = ("CBSE", "State Board")
+STANDARD_OPTIONS = tuple(f"Standard {number}" for number in range(1, 13))
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -126,11 +127,13 @@ def init_db() -> None:
                 full_name TEXT,
                 age INTEGER,
                 standard TEXT,
+                board TEXT,
                 age_range TEXT,
                 phone TEXT,
                 phone_verified INTEGER NOT NULL DEFAULT 0,
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 onboarding_completed INTEGER NOT NULL DEFAULT 0,
+                learning_profile_completed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS registration_challenges (
@@ -248,10 +251,12 @@ def init_db() -> None:
             ("full_name", "TEXT"),
             ("age", "INTEGER"),
             ("standard", "TEXT"),
+            ("board", "TEXT"),
             ("age_range", "TEXT"),
             ("phone", "TEXT"),
             ("phone_verified", "INTEGER NOT NULL DEFAULT 0"),
             ("onboarding_completed", "INTEGER NOT NULL DEFAULT 0"),
+            ("learning_profile_completed", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in columns:
                 connection.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
@@ -304,8 +309,32 @@ def normalize_phone(value: str) -> str | None:
 
 
 def normalize_standard(value: str) -> str | None:
-    match = re.fullmatch(r"(?:standard|std|grade)?\s*([1-9])", value.strip(), re.IGNORECASE)
+    match = re.fullmatch(r"(?:standard|std|grade)?\s*(1[0-2]|[1-9])", value.strip(), re.IGNORECASE)
     return f"Standard {match.group(1)}" if match else None
+
+
+def normalize_board(value: str) -> str | None:
+    value = " ".join(value.strip().split()).lower()
+    if value == "cbse":
+        return "CBSE"
+    if value in {"state", "state board", "stateboard"}:
+        return "State Board"
+    return None
+
+
+def learning_context(user: Any) -> str:
+    try:
+        board = user["board"]
+        standard = user["standard"]
+    except (KeyError, IndexError, TypeError):
+        board = None
+        standard = None
+    if not board or not standard:
+        return ""
+    return (
+        f"Learner profile: {board}, {standard}. Teach at this learner's age and curriculum level. "
+        "Use simple explanations first, then increase difficulty only when the learner asks."
+    )
 
 
 def mask_phone(phone: str) -> str:
@@ -808,7 +837,7 @@ async def live_teacher(websocket: WebSocket):
         client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         config = {
             "response_modalities": ["AUDIO"],
-            "system_instruction": "You are a patient personal teacher. Start speaking quickly with a concise answer of no more than 3 short sentences, then ask one guiding question. Explain step by step and simplify when the student says they are confused. Study context: " + context_for_user(user["id"]),
+            "system_instruction": "You are a patient personal teacher. Start speaking quickly with a concise answer of no more than 3 short sentences, then ask one guiding question. Explain step by step and simplify when the student says they are confused. " + learning_context(user) + " Study context: " + context_for_user(user["id"]),
             "input_audio_transcription": {},
             "output_audio_transcription": {},
             "realtime_input_config": {"automatic_activity_detection": {"silence_duration_ms": 500}},
@@ -924,6 +953,7 @@ def register(
     age_range: str = Form(""),
     age: str = Form(""),
     standard: str = Form(...),
+    board: str = Form("CBSE"),
     phone: str = Form(...),
 ):
     enforce_rate_limit(request, "auth")
@@ -932,6 +962,7 @@ def register(
         return RedirectResponse("/register?error=Use a valid email or international phone number", status_code=303)
     full_name = " ".join(full_name.split())
     standard = normalize_standard(standard)
+    board = normalize_board(board)
     normalized_phone = normalize_phone(phone)
     if len(full_name) < 2 or len(full_name) > 80:
         return RedirectResponse("/register?error=Enter your full name", status_code=303)
@@ -944,8 +975,8 @@ def register(
             age_range = ""
     if age_range not in AGE_RANGE_OPTIONS:
         return RedirectResponse("/register?error=Choose your age range", status_code=303)
-    if not standard:
-        return RedirectResponse("/register?error=Study Buddy is currently for Standards 1 to 9", status_code=303)
+    if not standard or not board:
+        return RedirectResponse("/register?error=Choose a class from 1 to 12 and a board", status_code=303)
     if not normalized_phone:
         return RedirectResponse("/register?error=Use a valid international phone number for verification", status_code=303)
     enforce_rate_limit(request, "auth", identity=f"registration:{normalized_phone}")
@@ -967,6 +998,7 @@ def register(
         "full_name": full_name,
         "age_range": age_range,
         "standard": standard,
+        "board": board,
         "phone": normalized_phone,
     }
     challenge = create_registration_challenge(payload)
@@ -1102,7 +1134,7 @@ def verify_phone(request: Request, token: str = Form(...), code: str = Form(...)
     try:
         with db() as connection:
             cursor = connection.execute(
-                "INSERT INTO users (identifier, identifier_type, password_hash, full_name, age_range, standard, phone, phone_verified, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?)",
+                "INSERT INTO users (identifier, identifier_type, password_hash, full_name, age_range, standard, board, phone, phone_verified, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)",
                 (
                     payload["identifier"],
                     payload["identifier_type"],
@@ -1110,6 +1142,7 @@ def verify_phone(request: Request, token: str = Form(...), code: str = Form(...)
                     payload["full_name"],
                     payload["age_range"],
                     payload["standard"],
+                    payload["board"],
                     payload["phone"],
                     utc_now(),
                 ),
@@ -1171,6 +1204,7 @@ def update_profile(
     full_name: str = Form(...),
     age_range: str = Form(...),
     standard: str = Form(...),
+    board: str = Form("CBSE"),
     study_session: str | None = Cookie(default=None),
 ):
     user = current_user(study_session)
@@ -1178,12 +1212,13 @@ def update_profile(
         return RedirectResponse("/login?error=Please+log+in+first&next=/profile", status_code=303)
     full_name = " ".join(full_name.split())
     standard = normalize_standard(standard)
-    if len(full_name) < 2 or len(full_name) > 80 or age_range not in AGE_RANGE_OPTIONS or not standard:
-        return RedirectResponse("/profile?message=Choose a Standard from 1 to 9", status_code=303)
+    board = normalize_board(board)
+    if len(full_name) < 2 or len(full_name) > 80 or age_range not in AGE_RANGE_OPTIONS or not standard or not board:
+        return RedirectResponse("/profile?message=Choose a class from 1 to 12 and a board", status_code=303)
     with db() as connection:
         connection.execute(
-            "UPDATE users SET full_name = ?, age_range = ?, standard = ? WHERE id = ?",
-            (full_name, age_range, standard, user["id"]),
+            "UPDATE users SET full_name = ?, age_range = ?, standard = ?, board = ?, learning_profile_completed = 1 WHERE id = ?",
+            (full_name, age_range, standard, board, user["id"]),
         )
     return RedirectResponse("/profile?message=Profile saved", status_code=303)
 
@@ -1232,7 +1267,7 @@ def dashboard(request: Request, study_session: str | None = Cookie(default=None)
             (user["id"], utc_now()),
         ).fetchall()
     return templates.TemplateResponse(
-        request, "pages/dashboard4.html", {"user": user, "items": items, "messages": user_chat(user["id"]), "stats": stats, "quiz_history": quiz_history, "due_reviews": due_reviews, "show_onboarding": not bool(user["onboarding_completed"]), "provider_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY"))}
+        request, "pages/dashboard4.html", {"user": user, "items": items, "messages": user_chat(user["id"]), "stats": stats, "quiz_history": quiz_history, "due_reviews": due_reviews, "show_onboarding": not bool(user["onboarding_completed"]), "learning_profile_ready": bool(user["learning_profile_completed"] and user["board"] and user["standard"]), "provider_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY"))}
     )
 
 
@@ -1349,6 +1384,27 @@ def complete_onboarding(study_session: str | None = Cookie(default=None)):
     return {"completed": True}
 
 
+@app.post("/api/profile/learning")
+def save_learning_profile(
+    standard: str = Form(...),
+    board: str = Form(...),
+    study_session: str | None = Cookie(default=None),
+):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    selected_standard = normalize_standard(standard)
+    selected_board = normalize_board(board)
+    if not selected_standard or not selected_board:
+        raise HTTPException(status_code=422, detail="Choose a class from 1 to 12 and a board")
+    with db() as connection:
+        connection.execute(
+            "UPDATE users SET standard = ?, board = ?, learning_profile_completed = 1 WHERE id = ?",
+            (selected_standard, selected_board, user["id"]),
+        )
+    return {"saved": True, "standard": selected_standard, "board": selected_board}
+
+
 @app.post("/api/conversations")
 def create_conversation(request: Request, title: str = Form("New study"), mode: str = Form("document"), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
@@ -1411,7 +1467,7 @@ def send_chat(request: Request, message: str = Form(...), conversation_id: int |
     if len(clean_message) > MAX_MESSAGE_CHARS:
         raise HTTPException(status_code=413, detail="message_too_long")
     # Plain chatbot path: no uploaded-document context is injected.
-    response_text = ai_answer(clean_message)
+    response_text = ai_answer(clean_message, learning_context(user))
     conversation_id = save_chat_turn(user["id"], clean_message, response_text, conversation_id, "general")
     return {"conversation_id": conversation_id, "messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
 
@@ -1436,7 +1492,8 @@ def send_rag_chat(request: Request, message: str = Form(...), conversation_id: i
         raise HTTPException(status_code=503, detail="rag_embedding_unavailable")
     if not retrieved_context:
         raise HTTPException(status_code=400, detail="upload_pdf_first")
-    response_text = ai_answer(clean_message, retrieved_context)
+    profile_context = learning_context(user)
+    response_text = ai_answer(clean_message, f"{profile_context}\n\n{retrieved_context}" if profile_context else retrieved_context)
     conversation_id = save_chat_turn(user["id"], clean_message, response_text, conversation["id"], "document")
     return {"conversation_id": conversation_id, "messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
 
