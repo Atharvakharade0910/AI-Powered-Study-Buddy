@@ -262,6 +262,45 @@ def test_state_board_requires_a_state() -> None:
     assert response.status_code == 422
 
 
+def test_curriculum_returns_subject_buttons_for_each_standard() -> None:
+    curriculum_client = TestClient(app.app)
+    register_verified(curriculum_client, "curriculum@example.com", "+919876543233")
+    csrf = {"X-CSRF-Token": curriculum_client.cookies["csrf_token"]}
+    saved = curriculum_client.post(
+        "/api/profile/learning",
+        data={"standard": "Standard 8", "board": "State Board", "state": "Maharashtra"},
+        headers=csrf,
+    )
+    assert saved.status_code == 200
+    curriculum = curriculum_client.get("/api/curriculum")
+    assert curriculum.status_code == 200
+    payload = curriculum.json()
+    assert payload["ready"] is True
+    assert payload["state"] == "Maharashtra"
+    assert {subject["name"] for subject in payload["subjects"]} >= {"Marathi", "Mathematics", "Science"}
+    assert "subject-map" == payload["coverage"]
+
+
+def test_subject_context_reaches_text_tutor(monkeypatch) -> None:
+    subject_client = TestClient(app.app)
+    register_verified(subject_client, "subject-context@example.com", "+919876543234")
+    csrf = {"X-CSRF-Token": subject_client.cookies["csrf_token"]}
+    subject_client.post(
+        "/api/profile/learning",
+        data={"standard": "Standard 8", "board": "CBSE"},
+        headers=csrf,
+    )
+    calls = []
+    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="": calls.append(context) or "answer")
+    response = subject_client.post(
+        "/api/chat",
+        data={"message": "Teach me Science from my syllabus"},
+        headers=csrf,
+    )
+    assert response.status_code == 200
+    assert "Current subject: Science" in calls[0]
+
+
 def test_streaming_chat_saves_the_complete_response(monkeypatch) -> None:
     stream_client = TestClient(app.app)
     register_verified(stream_client, "streaming@example.com", "+919876543232")

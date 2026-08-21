@@ -28,6 +28,7 @@ from fastapi import File, UploadFile
 from dotenv import load_dotenv
 from database import PostgresConnection
 from storage import delete_pdf, put_pdf
+from curriculum import curriculum_payload, subject_for_profile
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -244,6 +245,20 @@ def init_db() -> None:
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS curriculum_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                board TEXT NOT NULL,
+                state TEXT,
+                standard TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                chapter TEXT,
+                content TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                source_title TEXT,
+                academic_year TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(board, state, standard, subject, chapter, source_url)
+            );
             """
         )
         columns = {row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
@@ -278,6 +293,7 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_learning_events_user_topic ON learning_events(user_id, topic, created_at DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_curriculum_lookup ON curriculum_chunks(board, state, standard, subject)")
         quiz_columns = {row[1] for row in connection.execute("PRAGMA table_info(quizzes)").fetchall()}
         for column, definition in (("topic", "TEXT NOT NULL DEFAULT 'Document study'"), ("document_id", "INTEGER")):
             if column not in quiz_columns:
@@ -330,7 +346,23 @@ def normalize_state(value: str) -> str | None:
     return next((state for state in STATE_OPTIONS if state.casefold() == cleaned), None)
 
 
-def learning_context(user: Any) -> str:
+def curriculum_context(standard: str | None, board: str | None, state: str | None, subject: str | None) -> str:
+    if not standard or not board or not subject:
+        return ""
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT chapter, content, source_title, source_url, academic_year FROM curriculum_chunks WHERE board = ? AND standard = ? AND subject = ? AND (state = ? OR (state IS NULL AND ? = 'CBSE')) ORDER BY id DESC LIMIT 8",
+            (board, standard, subject, state, board),
+        ).fetchall()
+    if not rows:
+        return ""
+    return "Official syllabus context:\n" + "\n".join(
+        f"[Source: {row['source_title'] or row['source_url']}{f', academic year {row['academic_year']}' if row['academic_year'] else ''}] {row['chapter'] or 'Syllabus'}: {row['content']}"
+        for row in rows
+    )
+
+
+def learning_context(user: Any, subject: str | None = None) -> str:
     try:
         board = user["board"]
         standard = user["standard"]
@@ -340,10 +372,20 @@ def learning_context(user: Any) -> str:
         standard = None
     if not board or not standard:
         return ""
+    selected_subject = subject_for_profile(subject, standard, board, state)
+    subject_context = f" Current subject: {selected_subject.name}. Stay within this subject unless the learner asks to switch." if selected_subject else ""
+    source_context = curriculum_context(standard, board, state, selected_subject.name if selected_subject else None)
     return (
         f"Learner profile: {board}{f' ({state})' if state else ''}, {standard}. Teach at this learner's age and curriculum level. "
-        "Use simple explanations first, then increase difficulty only when the learner asks."
+        f"Use simple explanations first, then increase difficulty only when the learner asks.{subject_context}\n{source_context}"
     )
+
+
+def requested_subject(message: str, subject: str = "") -> str:
+    if subject.strip():
+        return subject.strip()
+    match = re.match(r"teach me (.+?) from my syllabus\s*$", message.strip(), re.IGNORECASE)
+    return match.group(1).strip() if match else ""
 
 
 def mask_phone(phone: str) -> str:
@@ -840,13 +882,14 @@ async def live_teacher(websocket: WebSocket):
         await websocket.send_json({"type": "error", "code": "missing_key", "message": "GEMINI_API_KEY is not configured on the server."})
         await websocket.close()
         return
+    selected_subject = websocket.query_params.get("subject", "")
     try:
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         config = {
             "response_modalities": ["AUDIO"],
-            "system_instruction": "You are a patient personal teacher. Start speaking quickly with a concise answer of no more than 3 short sentences, then ask one guiding question. Explain step by step and simplify when the student says they are confused. " + learning_context(user) + " Study context: " + context_for_user(user["id"]),
+            "system_instruction": "You are a patient personal teacher. Start speaking quickly with a concise answer of no more than 3 short sentences, then ask one guiding question. Explain step by step and simplify when the student says they are confused. " + learning_context(user, selected_subject) + " Study context: " + context_for_user(user["id"]),
             "input_audio_transcription": {},
             "output_audio_transcription": {},
             "realtime_input_config": {"automatic_activity_detection": {"silence_duration_ms": 500}},
@@ -1389,6 +1432,14 @@ def list_conversations(mode: str = "document", study_session: str | None = Cooki
     return {"conversations": [dict(conversation) for conversation in conversations]}
 
 
+@app.get("/api/curriculum")
+def get_curriculum(study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    return curriculum_payload(user["standard"], user["board"], user["state"])
+
+
 @app.post("/api/onboarding/complete")
 def complete_onboarding(study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
@@ -1473,7 +1524,7 @@ def delete_conversation(conversation_id: int, study_session: str | None = Cookie
 
 
 @app.post("/api/chat")
-def send_chat(request: Request, message: str = Form(...), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
+def send_chat(request: Request, message: str = Form(...), subject: str = Form(""), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
@@ -1484,13 +1535,13 @@ def send_chat(request: Request, message: str = Form(...), conversation_id: int |
     if len(clean_message) > MAX_MESSAGE_CHARS:
         raise HTTPException(status_code=413, detail="message_too_long")
     # Plain chatbot path: no uploaded-document context is injected.
-    response_text = ai_answer(clean_message, learning_context(user))
+    response_text = ai_answer(clean_message, learning_context(user, requested_subject(clean_message, subject)))
     conversation_id = save_chat_turn(user["id"], clean_message, response_text, conversation_id, "general")
     return {"conversation_id": conversation_id, "messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
 
 
 @app.post("/api/chat/stream")
-def stream_chat(request: Request, message: str = Form(...), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
+def stream_chat(request: Request, message: str = Form(...), subject: str = Form(""), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
@@ -1505,7 +1556,7 @@ def stream_chat(request: Request, message: str = Form(...), conversation_id: int
     def events():
         chunks = []
         try:
-            for chunk in ai_answer_stream(clean_message, learning_context(user)):
+            for chunk in ai_answer_stream(clean_message, learning_context(user, requested_subject(clean_message, subject))):
                 if chunk:
                     chunks.append(chunk)
                     yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
