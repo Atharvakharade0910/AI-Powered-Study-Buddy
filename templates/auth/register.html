@@ -34,8 +34,5 @@
     <div class="trust">Your profile and study history stay scoped to you</div>
   </main>
   <aside class="quote"><div class="quote-glow"></div><div class="quote-copy"><span class="quote-kicker">A BETTER WAY TO STUDY</span><p>Your curiosity is the<br><strong>starting point.</strong></p><span class="quote-foot">LEARN · PRACTICE · GROW</span></div></aside>
-<script>
-(()=>{const form=document.querySelector('form[action="/register"]'),stateBoard=form?.querySelector('input[value="State Board"]'),grid=form?.querySelector('.form-grid');if(!form||!stateBoard||!grid)return;const states=['Andhra Pradesh','Bihar','Gujarat','Karnataka','Kerala','Maharashtra','Odisha','Tamil Nadu','Telangana','Uttar Pradesh','West Bengal'];const label=document.createElement('label');label.id='register-state-field';label.hidden=true;label.textContent='State Board state';const select=document.createElement('select');select.name='state';select.innerHTML='<option value="">Choose your state</option>'+states.map(state=>`<option>${state}</option>`).join('');label.append(select);grid.insertBefore(label,grid.querySelector('label[for]')||grid.children[4]);const toggle=()=>{label.hidden=!stateBoard.checked;select.required=stateBoard.checked};form.querySelectorAll('input[name="board"]').forEach(input=>input.addEventListener('change',toggle));toggle()})();
-</script>
 </body>
 </html>

@@ -238,49 +238,17 @@ def test_learning_profile_selection_persists_board_and_class() -> None:
     csrf = {"X-CSRF-Token": profile_client.cookies["csrf_token"]}
     saved = profile_client.post(
         "/api/profile/learning",
-        data={"standard": "Standard 12", "board": "State Board", "state": "West Bengal"},
+        data={"standard": "Standard 12", "board": "State Board"},
         headers=csrf,
     )
-    assert saved.json() == {"saved": True, "standard": "Standard 12", "board": "State Board", "state": "West Bengal"}
+    assert saved.json() == {"saved": True, "standard": "Standard 12", "board": "State Board"}
     with app.db() as connection:
         user = connection.execute(
-            "SELECT standard, board, state FROM users WHERE identifier = ?",
+            "SELECT standard, board FROM users WHERE identifier = ?",
             ("learning-profile@example.com",),
         ).fetchone()
-    assert tuple(user) == ("Standard 12", "State Board", "West Bengal")
+    assert tuple(user) == ("Standard 12", "State Board")
     assert "State Board" in profile_client.get("/dashboard").text
-
-
-def test_state_board_requires_a_state() -> None:
-    profile_client = TestClient(app.app)
-    register_verified(profile_client, "state-required@example.com", "+919876543231")
-    response = profile_client.post(
-        "/api/profile/learning",
-        data={"standard": "Standard 10", "board": "State Board"},
-        headers={"X-CSRF-Token": profile_client.cookies["csrf_token"]},
-    )
-    assert response.status_code == 422
-
-
-def test_streaming_chat_saves_the_complete_response(monkeypatch) -> None:
-    stream_client = TestClient(app.app)
-    register_verified(stream_client, "streaming@example.com", "+919876543232")
-    monkeypatch.setattr(app, "ai_answer_stream", lambda prompt, context="": iter(["Hello ", "student."]))
-    response = stream_client.post(
-        "/api/chat/stream",
-        data={"message": "Introduce yourself"},
-        headers={"X-CSRF-Token": stream_client.cookies["csrf_token"]},
-    )
-    assert response.status_code == 200
-    assert '"type": "token"' in response.text
-    assert '"text": "Hello "' in response.text
-    assert '"text": "student."' in response.text
-    with app.db() as connection:
-        saved = connection.execute(
-            "SELECT message FROM chat_messages WHERE user_id = (SELECT id FROM users WHERE identifier = ?) AND role = 'assistant'",
-            ("streaming@example.com",),
-        ).fetchone()
-    assert saved["message"] == "Hello student."
 
 
 def test_profile_update_and_phone_change_require_verification() -> None:

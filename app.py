@@ -21,7 +21,7 @@ from urllib.parse import quote_plus, urlencode
 from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Cookie, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import File, UploadFile
@@ -32,7 +32,7 @@ from storage import delete_pdf, put_pdf
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-from ai_provider import answer as ai_answer, answer_stream as ai_answer_stream
+from ai_provider import answer as ai_answer
 
 logger = logging.getLogger("study_buddy")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -88,7 +88,6 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,20}$")
 AGE_RANGE_OPTIONS = ("Under 13", "13–15", "16–17", "18–24", "25+")
 BOARD_OPTIONS = ("CBSE", "State Board")
-STATE_OPTIONS = ("Andhra Pradesh", "Bihar", "Gujarat", "Karnataka", "Kerala", "Maharashtra", "Odisha", "Tamil Nadu", "Telangana", "Uttar Pradesh", "West Bengal")
 STANDARD_OPTIONS = tuple(f"Standard {number}" for number in range(1, 13))
 
 @asynccontextmanager
@@ -129,7 +128,6 @@ def init_db() -> None:
                 age INTEGER,
                 standard TEXT,
                 board TEXT,
-                state TEXT,
                 age_range TEXT,
                 phone TEXT,
                 phone_verified INTEGER NOT NULL DEFAULT 0,
@@ -254,7 +252,6 @@ def init_db() -> None:
             ("age", "INTEGER"),
             ("standard", "TEXT"),
             ("board", "TEXT"),
-            ("state", "TEXT"),
             ("age_range", "TEXT"),
             ("phone", "TEXT"),
             ("phone_verified", "INTEGER NOT NULL DEFAULT 0"),
@@ -325,23 +322,17 @@ def normalize_board(value: str) -> str | None:
     return None
 
 
-def normalize_state(value: str) -> str | None:
-    cleaned = " ".join(value.strip().split()).casefold()
-    return next((state for state in STATE_OPTIONS if state.casefold() == cleaned), None)
-
-
 def learning_context(user: Any) -> str:
     try:
         board = user["board"]
         standard = user["standard"]
-        state = user["state"]
     except (KeyError, IndexError, TypeError):
         board = None
         standard = None
     if not board or not standard:
         return ""
     return (
-        f"Learner profile: {board}{f' ({state})' if state else ''}, {standard}. Teach at this learner's age and curriculum level. "
+        f"Learner profile: {board}, {standard}. Teach at this learner's age and curriculum level. "
         "Use simple explanations first, then increase difficulty only when the learner asks."
     )
 
@@ -963,7 +954,6 @@ def register(
     age: str = Form(""),
     standard: str = Form(...),
     board: str = Form("CBSE"),
-    state: str = Form(""),
     phone: str = Form(...),
 ):
     enforce_rate_limit(request, "auth")
@@ -973,7 +963,6 @@ def register(
     full_name = " ".join(full_name.split())
     standard = normalize_standard(standard)
     board = normalize_board(board)
-    state = normalize_state(state) if board == "State Board" else None
     normalized_phone = normalize_phone(phone)
     if len(full_name) < 2 or len(full_name) > 80:
         return RedirectResponse("/register?error=Enter your full name", status_code=303)
@@ -986,8 +975,8 @@ def register(
             age_range = ""
     if age_range not in AGE_RANGE_OPTIONS:
         return RedirectResponse("/register?error=Choose your age range", status_code=303)
-    if not standard or not board or (board == "State Board" and not state):
-        return RedirectResponse("/register?error=Choose a class, board, and state board state", status_code=303)
+    if not standard or not board:
+        return RedirectResponse("/register?error=Choose a class from 1 to 12 and a board", status_code=303)
     if not normalized_phone:
         return RedirectResponse("/register?error=Use a valid international phone number for verification", status_code=303)
     enforce_rate_limit(request, "auth", identity=f"registration:{normalized_phone}")
@@ -1010,7 +999,6 @@ def register(
         "age_range": age_range,
         "standard": standard,
         "board": board,
-        "state": state,
         "phone": normalized_phone,
     }
     challenge = create_registration_challenge(payload)
@@ -1146,7 +1134,7 @@ def verify_phone(request: Request, token: str = Form(...), code: str = Form(...)
     try:
         with db() as connection:
             cursor = connection.execute(
-                "INSERT INTO users (identifier, identifier_type, password_hash, full_name, age_range, standard, board, state, phone, phone_verified, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)",
+                "INSERT INTO users (identifier, identifier_type, password_hash, full_name, age_range, standard, board, phone, phone_verified, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)",
                 (
                     payload["identifier"],
                     payload["identifier_type"],
@@ -1155,7 +1143,6 @@ def verify_phone(request: Request, token: str = Form(...), code: str = Form(...)
                     payload["age_range"],
                     payload["standard"],
                     payload["board"],
-                    payload["state"],
                     payload["phone"],
                     utc_now(),
                 ),
@@ -1218,7 +1205,6 @@ def update_profile(
     age_range: str = Form(...),
     standard: str = Form(...),
     board: str = Form("CBSE"),
-    state: str = Form(""),
     study_session: str | None = Cookie(default=None),
 ):
     user = current_user(study_session)
@@ -1227,13 +1213,12 @@ def update_profile(
     full_name = " ".join(full_name.split())
     standard = normalize_standard(standard)
     board = normalize_board(board)
-    state = normalize_state(state) if board == "State Board" else None
-    if len(full_name) < 2 or len(full_name) > 80 or age_range not in AGE_RANGE_OPTIONS or not standard or not board or (board == "State Board" and not state):
-        return RedirectResponse("/profile?message=Choose a class, board, and state board state", status_code=303)
+    if len(full_name) < 2 or len(full_name) > 80 or age_range not in AGE_RANGE_OPTIONS or not standard or not board:
+        return RedirectResponse("/profile?message=Choose a class from 1 to 12 and a board", status_code=303)
     with db() as connection:
         connection.execute(
-            "UPDATE users SET full_name = ?, age_range = ?, standard = ?, board = ?, state = ?, learning_profile_completed = 1 WHERE id = ?",
-            (full_name, age_range, standard, board, state, user["id"]),
+            "UPDATE users SET full_name = ?, age_range = ?, standard = ?, board = ?, learning_profile_completed = 1 WHERE id = ?",
+            (full_name, age_range, standard, board, user["id"]),
         )
     return RedirectResponse("/profile?message=Profile saved", status_code=303)
 
@@ -1282,7 +1267,7 @@ def dashboard(request: Request, study_session: str | None = Cookie(default=None)
             (user["id"], utc_now()),
         ).fetchall()
     return templates.TemplateResponse(
-        request, "pages/dashboard4.html", {"user": user, "items": items, "messages": user_chat(user["id"]), "stats": stats, "quiz_history": quiz_history, "due_reviews": due_reviews, "show_onboarding": not bool(user["onboarding_completed"]), "learning_profile_ready": bool(user["learning_profile_completed"] and user["board"] and user["standard"] and (user["board"] != "State Board" or user["state"])), "provider_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY"))}
+        request, "pages/dashboard4.html", {"user": user, "items": items, "messages": user_chat(user["id"]), "stats": stats, "quiz_history": quiz_history, "due_reviews": due_reviews, "show_onboarding": not bool(user["onboarding_completed"]), "learning_profile_ready": bool(user["learning_profile_completed"] and user["board"] and user["standard"]), "provider_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY"))}
     )
 
 
@@ -1403,7 +1388,6 @@ def complete_onboarding(study_session: str | None = Cookie(default=None)):
 def save_learning_profile(
     standard: str = Form(...),
     board: str = Form(...),
-    state: str = Form(""),
     study_session: str | None = Cookie(default=None),
 ):
     user = current_user(study_session)
@@ -1411,15 +1395,14 @@ def save_learning_profile(
         api_auth_error()
     selected_standard = normalize_standard(standard)
     selected_board = normalize_board(board)
-    selected_state = normalize_state(state) if selected_board == "State Board" else None
-    if not selected_standard or not selected_board or (selected_board == "State Board" and not selected_state):
-        raise HTTPException(status_code=422, detail="Choose a class, board, and state board state")
+    if not selected_standard or not selected_board:
+        raise HTTPException(status_code=422, detail="Choose a class from 1 to 12 and a board")
     with db() as connection:
         connection.execute(
-            "UPDATE users SET standard = ?, board = ?, state = ?, learning_profile_completed = 1 WHERE id = ?",
-            (selected_standard, selected_board, selected_state, user["id"]),
+            "UPDATE users SET standard = ?, board = ?, learning_profile_completed = 1 WHERE id = ?",
+            (selected_standard, selected_board, user["id"]),
         )
-    return {"saved": True, "standard": selected_standard, "board": selected_board, "state": selected_state}
+    return {"saved": True, "standard": selected_standard, "board": selected_board}
 
 
 @app.post("/api/conversations")
@@ -1487,40 +1470,6 @@ def send_chat(request: Request, message: str = Form(...), conversation_id: int |
     response_text = ai_answer(clean_message, learning_context(user))
     conversation_id = save_chat_turn(user["id"], clean_message, response_text, conversation_id, "general")
     return {"conversation_id": conversation_id, "messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
-
-
-@app.post("/api/chat/stream")
-def stream_chat(request: Request, message: str = Form(...), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
-    user = current_user(study_session)
-    if not user:
-        api_auth_error()
-    enforce_rate_limit(request, "chat", str(user["id"]))
-    clean_message = message.strip()
-    if not clean_message:
-        raise HTTPException(status_code=400, detail="message_required")
-    if len(clean_message) > MAX_MESSAGE_CHARS:
-        raise HTTPException(status_code=413, detail="message_too_long")
-    conversation = get_or_create_conversation(user["id"], conversation_id, "general")
-
-    def events():
-        chunks = []
-        try:
-            for chunk in ai_answer_stream(clean_message, learning_context(user)):
-                if chunk:
-                    chunks.append(chunk)
-                    yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
-            response_text = "".join(chunks).strip() or "I could not generate an answer yet."
-            saved_id = save_chat_turn(user["id"], clean_message, response_text, int(conversation["id"]), "general")
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': saved_id})}\n\n"
-        except Exception:
-            logger.exception("Text streaming failed for user %s", user["id"])
-            yield f"data: {json.dumps({'type': 'error', 'message': 'The tutor stream stopped unexpectedly. Please try again.'})}\n\n"
-
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
-    )
 
 
 @app.post("/api/rag/chat")
