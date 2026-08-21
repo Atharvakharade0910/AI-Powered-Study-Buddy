@@ -98,4 +98,4 @@ New accounts receive a one-time dashboard welcome tour explaining the General Te
 
 ## Supported learners
 
-Study Buddy supports learner profiles from Standard 1 through Standard 12, with CBSE and State Board selection. State Board profiles also store the selected state. The dashboard now exposes a board-aware subject map for each standard; chapter-level official syllabus ingestion and source verification remain an active product milestone.
+Study Buddy is currently designed for learners in Standard 1 through Standard 9. New registrations and profile updates accept only Standards 1–9. Existing account records are preserved during this product-scope change, but their next profile update must use a supported Standard.
