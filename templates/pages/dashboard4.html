@@ -101,4 +101,7 @@
 <script>
 document.getElementById('subject-buttons')?.addEventListener('click',event=>{const button=event.target.closest('[data-subject]');if(button)localStorage.setItem('study-buddy-subject',button.dataset.subject)});
 </script>
+<script>
+(()=>{const form=document.getElementById('learning-setup-form'),error=document.getElementById('learning-setup-error');if(!form||!error)return;const field=document.createElement('label');field.id='setup-stream-field';field.className='learning-choice-label';field.textContent='STREAM FOR STANDARD 11 OR 12';const select=document.createElement('select');select.name='stream';select.innerHTML='<option value="">Choose your stream</option>'+['Science','Commerce','Humanities','Vocational'].map(value=>`<option>${value}</option>`).join('');field.append(select);form.insertBefore(field,error);const toggle=()=>{const standard=form.querySelector('input[name="standard"]:checked')?.value||'';const visible=/Standard (11|12)$/.test(standard);field.hidden=!visible;select.required=visible};form.querySelectorAll('input[name="standard"]').forEach(input=>input.addEventListener('change',toggle));toggle()})();
+</script>
 </html>

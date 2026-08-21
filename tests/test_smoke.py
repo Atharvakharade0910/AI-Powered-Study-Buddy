@@ -238,16 +238,16 @@ def test_learning_profile_selection_persists_board_and_class() -> None:
     csrf = {"X-CSRF-Token": profile_client.cookies["csrf_token"]}
     saved = profile_client.post(
         "/api/profile/learning",
-        data={"standard": "Standard 12", "board": "State Board", "state": "West Bengal"},
+        data={"standard": "Standard 12", "board": "State Board", "state": "West Bengal", "stream": "Science"},
         headers=csrf,
     )
-    assert saved.json() == {"saved": True, "standard": "Standard 12", "board": "State Board", "state": "West Bengal"}
+    assert saved.json() == {"saved": True, "standard": "Standard 12", "board": "State Board", "state": "West Bengal", "stream": "Science"}
     with app.db() as connection:
         user = connection.execute(
-            "SELECT standard, board, state FROM users WHERE identifier = ?",
+            "SELECT standard, board, state, stream FROM users WHERE identifier = ?",
             ("learning-profile@example.com",),
         ).fetchone()
-    assert tuple(user) == ("Standard 12", "State Board", "West Bengal")
+    assert tuple(user) == ("Standard 12", "State Board", "West Bengal", "Science")
     assert "State Board" in profile_client.get("/dashboard").text
 
 
@@ -299,6 +299,43 @@ def test_subject_context_reaches_text_tutor(monkeypatch) -> None:
     )
     assert response.status_code == 200
     assert "Current subject: Science" in calls[0]
+
+
+def test_senior_secondary_requires_stream_and_filters_subjects() -> None:
+    senior_client = TestClient(app.app)
+    register_verified(senior_client, "senior-stream@example.com", "+919876543235")
+    csrf = {"X-CSRF-Token": senior_client.cookies["csrf_token"]}
+    missing_stream = senior_client.post(
+        "/api/profile/learning",
+        data={"standard": "Standard 11", "board": "CBSE"},
+        headers=csrf,
+    )
+    assert missing_stream.status_code == 422
+    saved = senior_client.post(
+        "/api/profile/learning",
+        data={"standard": "Standard 11", "board": "CBSE", "stream": "Commerce"},
+        headers=csrf,
+    )
+    assert saved.status_code == 200
+    payload = senior_client.get("/api/curriculum").json()
+    assert payload["stream"] == "Commerce"
+    names = {subject["name"] for subject in payload["subjects"]}
+    assert {"Accountancy", "Business Studies", "Economics"} <= names
+    assert "Physics" not in names
+
+
+def test_curriculum_context_uses_approved_source_only() -> None:
+    context_client = TestClient(app.app)
+    register_verified(context_client, "curriculum-source@example.com", "+919876543236")
+    with app.db() as connection:
+        user_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("curriculum-source@example.com",)).fetchone()["id"]
+        connection.execute("UPDATE users SET standard = ?, board = ?, state = NULL WHERE id = ?", ("Standard 8", "CBSE", user_id))
+        connection.execute(
+            "INSERT INTO curriculum_chunks (board, state, standard, subject, chapter, content, source_url, source_title, academic_year, review_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("CBSE", None, "Standard 8", "Science", "Cells", "Approved cell syllabus", "https://official.example/cells", "Official source", "2026-27", "approved", app.utc_now()),
+        )
+        user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    assert "Approved cell syllabus" in app.learning_context(user, "Science", "Cells")
 
 
 def test_streaming_chat_saves_the_complete_response(monkeypatch) -> None:
