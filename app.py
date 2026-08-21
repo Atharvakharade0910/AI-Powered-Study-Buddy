@@ -45,6 +45,10 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SESSION_DAYS = 14
 MAX_MESSAGE_CHARS = 8_000
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+try:
+    MAX_UPLOAD_PAGES = max(1, int(os.getenv("MAX_UPLOAD_PAGES", "200")))
+except ValueError:
+    MAX_UPLOAD_PAGES = 200
 MAX_CONTEXT_CHARS = 24_000
 MAX_DOCUMENTS_PER_USER = 50
 MAX_DOCUMENT_STORAGE_CHARS = 20_000_000
@@ -69,6 +73,11 @@ PHONE_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
 PHONE_VERIFICATION_MAX_RESENDS = 3
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "dev").strip().lower()
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+ALLOWED_ORIGINS = {
+    origin.rstrip("/")
+    for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+}
 if APP_ENV in {"production", "prod"} and not DATABASE_URL.startswith(("postgres://", "postgresql://")):
     raise RuntimeError("Production requires DATABASE_URL to point to PostgreSQL")
 if APP_ENV in {"production", "prod"} and not os.getenv("REDIS_URL", "").strip():
@@ -730,7 +739,7 @@ def enforce_rate_limit(request: Request, bucket: str, identity: str = "anonymous
 
 
 def validate_csrf(request: Request) -> None:
-    if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or request.url.path in {"/login", "/register", "/verify-phone", "/verify-phone/resend", "/logout"}:
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or request.url.path in {"/login", "/register", "/verify-phone", "/verify-phone/resend", "/logout", "/forgot-password", "/reset-password"}:
         return
     cookie_token = request.cookies.get("csrf_token")
     supplied = request.headers.get("x-csrf-token") or request.headers.get("x-csrftoken")
@@ -741,6 +750,7 @@ def validate_csrf(request: Request) -> None:
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     validate_csrf(request)
+    started = time.perf_counter()
     request_id = request.headers.get("x-request-id", "").strip()[:100] or secrets.token_hex(12)
     response = await call_next(request)
     if request.url.path == "/general" and response.headers.get("content-type", "").startswith("text/html"):
@@ -758,6 +768,7 @@ async def security_middleware(request: Request, call_next):
     response.headers.setdefault("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'")
     if APP_ENV in {"production", "prod"}:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    logger.info("request method=%s path=%s status=%s duration_ms=%d request_id=%s", request.method, request.url.path, response.status_code, int((time.perf_counter() - started) * 1000), request_id)
     return response
 
 
@@ -788,6 +799,10 @@ def readiness() -> dict[str, object]:
 
 @app.websocket("/ws/live")
 async def live_teacher(websocket: WebSocket):
+    origin = websocket.headers.get("origin", "").rstrip("/")
+    if origin and ALLOWED_ORIGINS and origin not in ALLOWED_ORIGINS:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     user = current_user(websocket.cookies.get("study_session"))
     if not user:
@@ -1142,6 +1157,60 @@ def login(request: Request, identifier: str = Form(...), password: str = Form(..
     return redirect_with_session(safe_next, create_session(user["id"]))
 
 
+@app.get("/forgot-password", response_class=HTMLResponse)
+def forgot_password_page(request: Request, error: str | None = None):
+    return templates.TemplateResponse(request, "auth/forgot_password.html", {"error": error})
+
+
+@app.post("/forgot-password")
+def forgot_password(request: Request, identifier: str = Form(...)):
+    client_host = request.client.host if request.client else "unknown"
+    enforce_rate_limit(request, "auth", identity=f"password-reset:{client_host}")
+    normalized, _ = normalize_identifier(identifier)
+    with db() as connection:
+        user = connection.execute("SELECT id, phone FROM users WHERE identifier = ?", (normalized or identifier.strip().lower(),)).fetchone()
+    # Do not reveal whether an account exists. Only verified phone accounts can
+    # receive a reset challenge in this deployment.
+    if not user or not user["phone"]:
+        return RedirectResponse("/forgot-password?error=If that account exists, a reset code has been sent", status_code=303)
+    challenge = create_registration_challenge({"kind": "password_reset", "user_id": user["id"], "phone": user["phone"]})
+    if not challenge:
+        return RedirectResponse("/forgot-password?error=We could not send a reset code right now", status_code=303)
+    token, _ = challenge
+    return RedirectResponse(f"/reset-password?token={quote_plus(token)}", status_code=303)
+
+
+@app.get("/reset-password", response_class=HTMLResponse)
+def reset_password_page(request: Request, token: str = "", error: str | None = None):
+    return templates.TemplateResponse(request, "auth/reset_password.html", {"token": token, "error": error})
+
+
+@app.post("/reset-password")
+def reset_password(request: Request, token: str = Form(...), code: str = Form(...), password: str = Form(...), confirm_password: str = Form(...)):
+    enforce_rate_limit(request, "auth", identity=f"password-reset:{token}")
+    with db() as connection:
+        challenge = connection.execute("SELECT * FROM registration_challenges WHERE token = ?", (token,)).fetchone()
+    if not challenge or json.loads(challenge["payload_json"]).get("kind") != "password_reset":
+        return RedirectResponse("/forgot-password?error=That reset request is no longer available", status_code=303)
+    if datetime.fromisoformat(challenge["expires_at"]) <= datetime.now(timezone.utc):
+        return RedirectResponse("/forgot-password?error=That reset code expired", status_code=303)
+    if challenge["attempts"] >= 5:
+        return RedirectResponse("/forgot-password?error=Too many reset attempts. Please request a new code", status_code=303)
+    expected_hash = hashlib.sha256(f"{token}:{code.strip()}".encode()).hexdigest()
+    if not hmac.compare_digest(expected_hash, challenge["code_hash"]):
+        with db() as connection:
+            connection.execute("UPDATE registration_challenges SET attempts = attempts + 1 WHERE token = ?", (token,))
+        return RedirectResponse(f"/reset-password?token={quote_plus(token)}&error=The reset code is incorrect", status_code=303)
+    if len(password) < 8 or password != confirm_password:
+        return RedirectResponse(f"/reset-password?token={quote_plus(token)}&error=Passwords must match and be at least 8 characters", status_code=303)
+    payload = json.loads(challenge["payload_json"])
+    with db() as connection:
+        connection.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(password), payload["user_id"]))
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (payload["user_id"],))
+        connection.execute("DELETE FROM registration_challenges WHERE token = ?", (token,))
+    return RedirectResponse("/login?error=Password updated. Please sign in again", status_code=303)
+
+
 @app.post("/logout")
 def logout(study_session: str | None = Cookie(default=None)):
     if study_session:
@@ -1454,8 +1523,19 @@ async def upload_document(request: Request, file: UploadFile = File(...), conver
         raise HTTPException(status_code=413, detail="pdf_too_large")
     if not raw.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="invalid_pdf")
+    try:
+        import fitz
+
+        with fitz.open(stream=raw, filetype="pdf") as pdf:
+            if pdf.page_count > MAX_UPLOAD_PAGES:
+                raise HTTPException(status_code=413, detail="pdf_page_limit_reached")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_pdf")
+    safe_filename = re.sub(r"[^A-Za-z0-9._ -]", "_", Path(file.filename).name)[:160] or "uploaded.pdf"
     loop = asyncio.get_running_loop()
-    text = await loop.run_in_executor(_document_executor, extract_pdf_text, raw, file.filename)
+    text = await loop.run_in_executor(_document_executor, extract_pdf_text, raw, safe_filename)
     if not text.strip():
         return {"error": "could_not_extract_text"}
     conversation = get_or_create_conversation(user["id"], conversation_id, "document")
@@ -1468,10 +1548,10 @@ async def upload_document(request: Request, file: UploadFile = File(...), conver
             raise HTTPException(status_code=413, detail="document_limit_reached")
         if document_totals["stored_chars"] + min(len(text), 2_000_000) > MAX_DOCUMENT_STORAGE_CHARS:
             raise HTTPException(status_code=413, detail="document_storage_limit_reached")
-        cursor = connection.execute("INSERT INTO documents (user_id, filename, content, created_at) VALUES (?, ?, ?, ?)", (user["id"], file.filename, text[:2_000_000], utc_now()))
+        cursor = connection.execute("INSERT INTO documents (user_id, filename, content, created_at) VALUES (?, ?, ?, ?)", (user["id"], safe_filename, text[:2_000_000], utc_now()))
         document_id = cursor.lastrowid
     try:
-        storage_key = await loop.run_in_executor(_document_executor, put_pdf, user["id"], document_id, file.filename, raw)
+        storage_key = await loop.run_in_executor(_document_executor, put_pdf, user["id"], document_id, safe_filename, raw)
     except Exception as error:
         logger.exception("Original PDF storage failed: %s", type(error).__name__)
         with db() as connection:
@@ -1485,7 +1565,7 @@ async def upload_document(request: Request, file: UploadFile = File(...), conver
             "INSERT OR IGNORE INTO conversation_documents (conversation_id, document_id, created_at) VALUES (?, ?, ?)",
             (conversation["id"], document_id, utc_now()),
         )
-    return {"id": document_id, "filename": file.filename, "characters": len(text), "conversation_id": conversation["id"]}
+    return {"id": document_id, "filename": safe_filename, "characters": len(text), "conversation_id": conversation["id"]}
 
 
 @app.get("/api/documents")
@@ -1726,6 +1806,59 @@ def export_chat(study_session: str | None = Cookie(default=None)):
     for message in user_chat(user["id"]):
         lines.append(f"{message['role'].upper()}: {message['message']}")
     return PlainTextResponse("\n".join(lines), headers={"Content-Disposition": "attachment; filename=study-buddy-chat.txt"})
+
+
+@app.get("/api/export/account")
+def export_account(study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    with db() as connection:
+        documents = connection.execute("SELECT id, filename, created_at FROM documents WHERE user_id = ?", (user["id"],)).fetchall()
+        messages = connection.execute("SELECT role, message, created_at FROM chat_messages WHERE user_id = ? ORDER BY id", (user["id"],)).fetchall()
+        voice = connection.execute("SELECT role, message, created_at FROM voice_messages WHERE user_id = ? ORDER BY id", (user["id"],)).fetchall()
+        quizzes = connection.execute("SELECT id, title, topic, score, created_at FROM quizzes WHERE user_id = ? ORDER BY id", (user["id"],)).fetchall()
+        reviews = connection.execute("SELECT prompt, answer, due_at, interval_days, repetitions, topic FROM review_cards WHERE user_id = ? ORDER BY id", (user["id"],)).fetchall()
+    payload = {"account": {"identifier": user["identifier"], "full_name": user["full_name"], "created_at": user["created_at"]}, "documents": [dict(row) for row in documents], "chat": [dict(row) for row in messages], "voice": [dict(row) for row in voice], "quizzes": [dict(row) for row in quizzes], "reviews": [dict(row) for row in reviews]}
+    return PlainTextResponse(json.dumps(payload, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": "attachment; filename=study-buddy-account-export.json"})
+
+
+def _delete_account_data(user_id: int) -> None:
+    with db() as connection:
+        documents = connection.execute("SELECT storage_key FROM documents WHERE user_id = ?", (user_id,)).fetchall()
+        for document in documents:
+            try:
+                delete_pdf(document["storage_key"])
+            except Exception:
+                logger.exception("Object-storage cleanup failed for user %s", user_id)
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+
+def _delete_account_response(user_id: int, study_session: str | None, redirect: bool = False):
+    _delete_account_data(user_id)
+    response = RedirectResponse("/login?error=Account+deleted", status_code=303) if redirect else PlainTextResponse(json.dumps({"deleted": True}), media_type="application/json")
+    response.delete_cookie("study_session")
+    return response
+
+
+@app.delete("/api/account")
+def delete_account(confirm: str = Form(...), study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    if confirm != "DELETE MY ACCOUNT":
+        raise HTTPException(status_code=400, detail="confirmation_required")
+    return _delete_account_response(user["id"], study_session)
+
+
+@app.post("/api/account/delete")
+def delete_account_form(confirm: str = Form(...), study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        return RedirectResponse("/login?error=Please+sign+in+again", status_code=303)
+    if confirm != "DELETE MY ACCOUNT":
+        raise HTTPException(status_code=400, detail="confirmation_required")
+    return _delete_account_response(user["id"], study_session, redirect=True)
 
 
 @app.get("/admin", response_class=HTMLResponse)

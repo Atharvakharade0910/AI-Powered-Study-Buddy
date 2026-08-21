@@ -354,6 +354,31 @@ def test_mutating_api_requires_authentication() -> None:
     assert response.status_code == 401
 
 
+def test_password_reset_updates_password_and_revokes_sessions() -> None:
+    reset_client = TestClient(app.app)
+    register_verified(reset_client, "reset@example.com", "+919876543237")
+    reset_response = reset_client.post("/forgot-password", data={"identifier": "reset@example.com"}, follow_redirects=False)
+    assert reset_response.status_code == 303
+    token = parse_qs(urlparse(reset_response.headers["location"]).query)["token"][0]
+    with app.db() as connection:
+        challenge = connection.execute("SELECT dev_code FROM registration_challenges WHERE token = ?", (token,)).fetchone()
+    response = reset_client.post("/reset-password", data={"token": token, "code": challenge["dev_code"], "password": "newpassword123", "confirm_password": "newpassword123"}, follow_redirects=False)
+    assert response.status_code == 303
+    login = reset_client.post("/login", data={"identifier": "reset@example.com", "password": "newpassword123"}, follow_redirects=False)
+    assert login.status_code == 303
+
+
+def test_account_export_and_delete_are_user_scoped() -> None:
+    account_client = TestClient(app.app)
+    register_verified(account_client, "account-data@example.com", "+919876543238")
+    exported = account_client.get("/api/export/account")
+    assert exported.status_code == 200
+    assert exported.json()["account"]["identifier"] == "account-data@example.com"
+    deleted = account_client.request("DELETE", "/api/account", data={"confirm": "DELETE MY ACCOUNT"}, headers={"X-CSRF-Token": account_client.cookies["csrf_token"]})
+    assert deleted.status_code == 200
+    assert account_client.get("/dashboard", follow_redirects=False).status_code == 303
+
+
 def test_upload_limits_and_pdf_signature() -> None:
     register_verified(client, "reader@example.com", "+919876543205")
     invalid = client.post("/api/documents", files={"file": ("notes.pdf", b"not a pdf", "application/pdf")}, headers={"X-CSRF-Token": client.cookies["csrf_token"]})

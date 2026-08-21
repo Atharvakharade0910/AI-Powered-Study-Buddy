@@ -7,6 +7,9 @@ services:
       APP_ENV: development
       COOKIE_SECURE: "0"
       REDIS_URL: redis://redis:6379/0
+    # Local Compose intentionally uses SQLite; Alembic is only run by the
+    # PostgreSQL production Compose stack.
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     ports:
       - "8000:8000"
     volumes:
