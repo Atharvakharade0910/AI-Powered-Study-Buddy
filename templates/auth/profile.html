@@ -21,7 +21,4 @@
 <script>
   document.querySelectorAll('form[method="post"]').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const csrf=form.querySelector('input[name="csrf_token"]')?.value||'';const response=await fetch(form.action,{method:'POST',headers:{'X-CSRF-Token':csrf},body:new FormData(form)});window.location.href=response.url}));
 </script>
-<script>
-(()=>{const form=document.querySelector('form[action="/profile"]');if(!form)return;const field=document.createElement('label');field.id='profile-stream-field';field.textContent='Stream for Standard 11 or 12';const select=document.createElement('select');select.name='stream';select.innerHTML='<option value="">Choose your stream</option>'+['Science','Commerce','Humanities','Vocational'].map(value=>`<option>${value}</option>`).join('');select.value={{ (user['stream'] or '')|tojson }};field.append(select);form.insertBefore(field,form.querySelector('button'));const toggle=()=>{const standard=form.querySelector('input[name="standard"]:checked')?.value||'';const visible=/Standard (11|12)$/.test(standard);field.hidden=!visible;select.required=visible};form.querySelectorAll('input[name="standard"]').forEach(input=>input.addEventListener('change',toggle));toggle()})();
-</script>
 </html>

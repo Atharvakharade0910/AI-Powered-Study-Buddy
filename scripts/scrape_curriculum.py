@@ -12,7 +12,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import html
 import re
 import sys
@@ -53,12 +52,8 @@ def fetch_text(url: str) -> str:
     with urlopen(request, timeout=30) as response:
         content_type = response.headers.get("Content-Type", "")
         raw = response.read()
-    if "pdf" in content_type.lower() or url.lower().endswith(".pdf"):
-        import fitz
-        document = fitz.open(stream=raw, filetype="pdf")
-        return "\n".join(f"[Page {page.number + 1}] {page.get_text('text')}" for page in document)
     if "html" not in content_type.lower() and not url.lower().endswith(('.html', '.htm')):
-        raise ValueError("The source must be an official HTML syllabus page or PDF")
+        raise ValueError("This first importer accepts HTML syllabus pages; PDF extraction needs a reviewed PDF pipeline.")
     parser = TextParser()
     parser.feed(raw.decode("utf-8", errors="replace"))
     return " ".join(parser.parts)
@@ -72,11 +67,8 @@ def main() -> int:
     parser.add_argument("--standard", required=True)
     parser.add_argument("--subject", required=True)
     parser.add_argument("--chapter", default="Syllabus overview")
-    parser.add_argument("--topic", default="")
-    parser.add_argument("--stream", default="")
     parser.add_argument("--year", default="")
     parser.add_argument("--title", default="Official curriculum source")
-    parser.add_argument("--review-status", choices=["pending", "approved"], default="pending")
     args = parser.parse_args()
     if args.board == "State Board" and not args.state:
         parser.error("--state is required for State Board imports")
@@ -86,8 +78,8 @@ def main() -> int:
     init_db()
     with db() as connection:
         connection.execute(
-            "INSERT INTO curriculum_chunks (board, state, standard, subject, stream, chapter, topic, content, source_url, source_title, academic_year, review_status, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (board, state, standard, subject, chapter, source_url) DO UPDATE SET stream = excluded.stream, topic = excluded.topic, content = excluded.content, source_title = excluded.source_title, academic_year = excluded.academic_year, review_status = excluded.review_status, content_hash = excluded.content_hash, created_at = excluded.created_at",
-            (args.board, args.state if args.board == "State Board" else None, args.standard, args.subject, args.stream or None, args.chapter, args.topic or None, content[:24000], args.url, args.title, args.year, args.review_status, hashlib.sha256(content.encode()).hexdigest(), datetime.now(timezone.utc).isoformat()),
+            "INSERT OR REPLACE INTO curriculum_chunks (board, state, standard, subject, chapter, content, source_url, source_title, academic_year, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (args.board, args.state if args.board == "State Board" else None, args.standard, args.subject, args.chapter, content[:24000], args.url, args.title, args.year, datetime.now(timezone.utc).isoformat()),
         )
     print(f"Imported {args.board} {args.state or ''} {args.standard} {args.subject} from {args.url}")
     return 0

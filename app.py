@@ -70,7 +70,6 @@ PHONE_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
 PHONE_VERIFICATION_MAX_RESENDS = 3
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "dev").strip().lower()
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
-ALLOWED_ORIGINS = {origin.strip().rstrip("/") for origin in os.getenv("ALLOWED_ORIGINS", "http://127.0.0.1:8000,http://localhost:8000").split(",") if origin.strip()}
 if APP_ENV in {"production", "prod"} and not DATABASE_URL.startswith(("postgres://", "postgresql://")):
     raise RuntimeError("Production requires DATABASE_URL to point to PostgreSQL")
 if APP_ENV in {"production", "prod"} and not os.getenv("REDIS_URL", "").strip():
@@ -90,7 +89,6 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,20}$")
 AGE_RANGE_OPTIONS = ("Under 13", "13–15", "16–17", "18–24", "25+")
 BOARD_OPTIONS = ("CBSE", "State Board")
-STREAM_OPTIONS = ("Science", "Commerce", "Humanities", "Vocational")
 STATE_OPTIONS = ("Andhra Pradesh", "Bihar", "Gujarat", "Karnataka", "Kerala", "Maharashtra", "Odisha", "Tamil Nadu", "Telangana", "Uttar Pradesh", "West Bengal")
 STANDARD_OPTIONS = tuple(f"Standard {number}" for number in range(1, 13))
 
@@ -133,7 +131,6 @@ def init_db() -> None:
                 standard TEXT,
                 board TEXT,
                 state TEXT,
-                stream TEXT,
                 age_range TEXT,
                 phone TEXT,
                 phone_verified INTEGER NOT NULL DEFAULT 0,
@@ -254,16 +251,11 @@ def init_db() -> None:
                 state TEXT,
                 standard TEXT NOT NULL,
                 subject TEXT NOT NULL,
-                stream TEXT,
                 chapter TEXT,
-                topic TEXT,
                 content TEXT NOT NULL,
                 source_url TEXT NOT NULL,
                 source_title TEXT,
                 academic_year TEXT,
-                review_status TEXT NOT NULL DEFAULT 'pending',
-                content_hash TEXT,
-                reviewed_at TEXT,
                 created_at TEXT NOT NULL,
                 UNIQUE(board, state, standard, subject, chapter, source_url)
             );
@@ -278,7 +270,6 @@ def init_db() -> None:
             ("standard", "TEXT"),
             ("board", "TEXT"),
             ("state", "TEXT"),
-            ("stream", "TEXT"),
             ("age_range", "TEXT"),
             ("phone", "TEXT"),
             ("phone_verified", "INTEGER NOT NULL DEFAULT 0"),
@@ -303,10 +294,6 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_learning_events_user_topic ON learning_events(user_id, topic, created_at DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_curriculum_lookup ON curriculum_chunks(board, state, standard, subject)")
-        curriculum_columns = {row[1] for row in connection.execute("PRAGMA table_info(curriculum_chunks)").fetchall()}
-        for column, definition in (("stream", "TEXT"), ("topic", "TEXT"), ("review_status", "TEXT NOT NULL DEFAULT 'pending'"), ("content_hash", "TEXT"), ("reviewed_at", "TEXT")):
-            if column not in curriculum_columns:
-                connection.execute(f"ALTER TABLE curriculum_chunks ADD COLUMN {column} {definition}")
         quiz_columns = {row[1] for row in connection.execute("PRAGMA table_info(quizzes)").fetchall()}
         for column, definition in (("topic", "TEXT NOT NULL DEFAULT 'Document study'"), ("document_id", "INTEGER")):
             if column not in quiz_columns:
@@ -359,47 +346,37 @@ def normalize_state(value: str) -> str | None:
     return next((state for state in STATE_OPTIONS if state.casefold() == cleaned), None)
 
 
-def normalize_stream(value: str) -> str | None:
-    cleaned = " ".join(value.strip().split()).casefold()
-    return next((stream for stream in STREAM_OPTIONS if stream.casefold() == cleaned), None)
-
-
-def curriculum_context(standard: str | None, board: str | None, state: str | None, stream: str | None, subject: str | None, chapter: str | None = None, topic: str | None = None) -> str:
+def curriculum_context(standard: str | None, board: str | None, state: str | None, subject: str | None) -> str:
     if not standard or not board or not subject:
         return ""
     with db() as connection:
         rows = connection.execute(
-            "SELECT chapter, topic, content, source_title, source_url, academic_year FROM curriculum_chunks WHERE board = ? AND standard = ? AND subject = ? AND COALESCE(stream, '') = COALESCE(?, '') AND (state = ? OR (state IS NULL AND ? = 'CBSE')) AND review_status = 'approved' AND (? IS NULL OR chapter = ?) AND (? IS NULL OR topic = ?) ORDER BY id DESC LIMIT 8",
-            (board, standard, subject, stream, state, board, chapter, chapter, topic, topic),
+            "SELECT chapter, content, source_title, source_url, academic_year FROM curriculum_chunks WHERE board = ? AND standard = ? AND subject = ? AND (state = ? OR (state IS NULL AND ? = 'CBSE')) ORDER BY id DESC LIMIT 8",
+            (board, standard, subject, state, board),
         ).fetchall()
     if not rows:
         return ""
-    lines = []
-    for row in rows:
-        year = f", academic year {row['academic_year']}" if row['academic_year'] else ""
-        topic_label = f" / {row['topic']}" if row['topic'] else ""
-        lines.append(f"[Source: {row['source_title'] or row['source_url']}{year}] {row['chapter'] or 'Syllabus'}{topic_label}: {row['content']}")
-    return "Official syllabus context:\n" + "\n".join(lines)
+    return "Official syllabus context:\n" + "\n".join(
+        f"[Source: {row['source_title'] or row['source_url']}{f', academic year {row['academic_year']}' if row['academic_year'] else ''}] {row['chapter'] or 'Syllabus'}: {row['content']}"
+        for row in rows
+    )
 
 
-def learning_context(user: Any, subject: str | None = None, chapter: str | None = None, topic: str | None = None) -> str:
+def learning_context(user: Any, subject: str | None = None) -> str:
     try:
         board = user["board"]
         standard = user["standard"]
         state = user["state"]
-        stream = user["stream"]
     except (KeyError, IndexError, TypeError):
         board = None
         standard = None
-        state = None
-        stream = None
     if not board or not standard:
         return ""
-    selected_subject = subject_for_profile(subject, standard, board, state, stream)
+    selected_subject = subject_for_profile(subject, standard, board, state)
     subject_context = f" Current subject: {selected_subject.name}. Stay within this subject unless the learner asks to switch." if selected_subject else ""
-    source_context = curriculum_context(standard, board, state, stream, selected_subject.name if selected_subject else None, chapter, topic)
+    source_context = curriculum_context(standard, board, state, selected_subject.name if selected_subject else None)
     return (
-        f"Learner profile: {board}{f' ({state})' if state else ''}, {standard}{f' / {stream}' if stream else ''}. Teach at this learner's age and curriculum level. "
+        f"Learner profile: {board}{f' ({state})' if state else ''}, {standard}. Teach at this learner's age and curriculum level. "
         f"Use simple explanations first, then increase difficulty only when the learner asks.{subject_context}\n{source_context}"
     )
 
@@ -891,10 +868,6 @@ def readiness() -> dict[str, object]:
 
 @app.websocket("/ws/live")
 async def live_teacher(websocket: WebSocket):
-    origin = websocket.headers.get("origin", "").rstrip("/")
-    if origin and origin not in ALLOWED_ORIGINS:
-        await websocket.close(code=1008)
-        return
     await websocket.accept()
     user = current_user(websocket.cookies.get("study_session"))
     if not user:
@@ -1034,7 +1007,6 @@ def register(
     standard: str = Form(...),
     board: str = Form("CBSE"),
     state: str = Form(""),
-    stream: str = Form(""),
     phone: str = Form(...),
 ):
     enforce_rate_limit(request, "auth")
@@ -1045,7 +1017,6 @@ def register(
     standard = normalize_standard(standard)
     board = normalize_board(board)
     state = normalize_state(state) if board == "State Board" else None
-    stream = normalize_stream(stream) if standard and standard in {"Standard 11", "Standard 12"} else None
     normalized_phone = normalize_phone(phone)
     if len(full_name) < 2 or len(full_name) > 80:
         return RedirectResponse("/register?error=Enter your full name", status_code=303)
@@ -1058,8 +1029,8 @@ def register(
             age_range = ""
     if age_range not in AGE_RANGE_OPTIONS:
         return RedirectResponse("/register?error=Choose your age range", status_code=303)
-    if not standard or not board or (board == "State Board" and not state) or (standard in {"Standard 11", "Standard 12"} and not stream):
-        return RedirectResponse("/register?error=Choose a class, board, state, and stream where required", status_code=303)
+    if not standard or not board or (board == "State Board" and not state):
+        return RedirectResponse("/register?error=Choose a class, board, and state board state", status_code=303)
     if not normalized_phone:
         return RedirectResponse("/register?error=Use a valid international phone number for verification", status_code=303)
     enforce_rate_limit(request, "auth", identity=f"registration:{normalized_phone}")
@@ -1083,7 +1054,6 @@ def register(
         "standard": standard,
         "board": board,
         "state": state,
-        "stream": stream,
         "phone": normalized_phone,
     }
     challenge = create_registration_challenge(payload)
@@ -1219,7 +1189,7 @@ def verify_phone(request: Request, token: str = Form(...), code: str = Form(...)
     try:
         with db() as connection:
             cursor = connection.execute(
-                "INSERT INTO users (identifier, identifier_type, password_hash, full_name, age_range, standard, board, state, stream, phone, phone_verified, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)",
+                "INSERT INTO users (identifier, identifier_type, password_hash, full_name, age_range, standard, board, state, phone, phone_verified, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)",
                 (
                     payload["identifier"],
                     payload["identifier_type"],
@@ -1229,7 +1199,6 @@ def verify_phone(request: Request, token: str = Form(...), code: str = Form(...)
                     payload["standard"],
                     payload["board"],
                     payload["state"],
-                    payload["stream"],
                     payload["phone"],
                     utc_now(),
                 ),
@@ -1293,7 +1262,6 @@ def update_profile(
     standard: str = Form(...),
     board: str = Form("CBSE"),
     state: str = Form(""),
-    stream: str = Form(""),
     study_session: str | None = Cookie(default=None),
 ):
     user = current_user(study_session)
@@ -1303,13 +1271,12 @@ def update_profile(
     standard = normalize_standard(standard)
     board = normalize_board(board)
     state = normalize_state(state) if board == "State Board" else None
-    stream = normalize_stream(stream) if standard in {"Standard 11", "Standard 12"} else None
-    if len(full_name) < 2 or len(full_name) > 80 or age_range not in AGE_RANGE_OPTIONS or not standard or not board or (board == "State Board" and not state) or (standard in {"Standard 11", "Standard 12"} and not stream):
-        return RedirectResponse("/profile?message=Choose a class, board, state, and stream where required", status_code=303)
+    if len(full_name) < 2 or len(full_name) > 80 or age_range not in AGE_RANGE_OPTIONS or not standard or not board or (board == "State Board" and not state):
+        return RedirectResponse("/profile?message=Choose a class, board, and state board state", status_code=303)
     with db() as connection:
         connection.execute(
-            "UPDATE users SET full_name = ?, age_range = ?, standard = ?, board = ?, state = ?, stream = ?, learning_profile_completed = 1 WHERE id = ?",
-            (full_name, age_range, standard, board, state, stream, user["id"]),
+            "UPDATE users SET full_name = ?, age_range = ?, standard = ?, board = ?, state = ?, learning_profile_completed = 1 WHERE id = ?",
+            (full_name, age_range, standard, board, state, user["id"]),
         )
     return RedirectResponse("/profile?message=Profile saved", status_code=303)
 
@@ -1358,7 +1325,7 @@ def dashboard(request: Request, study_session: str | None = Cookie(default=None)
             (user["id"], utc_now()),
         ).fetchall()
     return templates.TemplateResponse(
-        request, "pages/dashboard4.html", {"user": user, "items": items, "messages": user_chat(user["id"]), "stats": stats, "quiz_history": quiz_history, "due_reviews": due_reviews, "show_onboarding": not bool(user["onboarding_completed"]), "learning_profile_ready": bool(user["learning_profile_completed"] and user["board"] and user["standard"] and (user["board"] != "State Board" or user["state"]) and (user["standard"] not in {"Standard 11", "Standard 12"} or user["stream"])), "provider_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY"))}
+        request, "pages/dashboard4.html", {"user": user, "items": items, "messages": user_chat(user["id"]), "stats": stats, "quiz_history": quiz_history, "due_reviews": due_reviews, "show_onboarding": not bool(user["onboarding_completed"]), "learning_profile_ready": bool(user["learning_profile_completed"] and user["board"] and user["standard"] and (user["board"] != "State Board" or user["state"])), "provider_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY"))}
     )
 
 
@@ -1470,35 +1437,7 @@ def get_curriculum(study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
-    return curriculum_payload(user["standard"], user["board"], user["state"], user["stream"])
-
-
-@app.get("/api/curriculum/chapters")
-def get_curriculum_chapters(subject: str, study_session: str | None = Cookie(default=None)):
-    user = current_user(study_session)
-    if not user:
-        api_auth_error()
-    selected = subject_for_profile(subject, user["standard"], user["board"], user["state"], user["stream"])
-    if not selected:
-        raise HTTPException(status_code=400, detail="subject_not_available_for_profile")
-    with db() as connection:
-        rows = connection.execute(
-            "SELECT DISTINCT chapter, topic, academic_year, source_title, source_url FROM curriculum_chunks WHERE board = ? AND standard = ? AND subject = ? AND COALESCE(stream, '') = COALESCE(?, '') AND (state = ? OR (state IS NULL AND ? = 'CBSE')) AND review_status = 'approved' ORDER BY chapter, topic",
-            (user["board"], user["standard"], selected.name, user["stream"], user["state"], user["board"]),
-        ).fetchall()
-    return {"subject": selected.name, "chapters": [dict(row) for row in rows]}
-
-
-@app.post("/api/curriculum/progress")
-def record_curriculum_progress(subject: str = Form(...), chapter: str = Form(""), topic: str = Form(""), study_session: str | None = Cookie(default=None)):
-    user = current_user(study_session)
-    if not user:
-        api_auth_error()
-    selected = subject_for_profile(subject, user["standard"], user["board"], user["state"], user["stream"])
-    if not selected:
-        raise HTTPException(status_code=400, detail="subject_not_available_for_profile")
-    record_learning_event(user["id"], "curriculum_progress", f"{selected.name} / {chapter or 'subject'} / {topic or 'overview'}", metadata={"subject": selected.name, "chapter": chapter, "topic": topic, "board": user["board"], "state": user["state"], "standard": user["standard"], "stream": user["stream"]})
-    return {"recorded": True, "subject": selected.name, "chapter": chapter, "topic": topic}
+    return curriculum_payload(user["standard"], user["board"], user["state"])
 
 
 @app.post("/api/onboarding/complete")
@@ -1516,7 +1455,6 @@ def save_learning_profile(
     standard: str = Form(...),
     board: str = Form(...),
     state: str = Form(""),
-    stream: str = Form(""),
     study_session: str | None = Cookie(default=None),
 ):
     user = current_user(study_session)
@@ -1525,15 +1463,14 @@ def save_learning_profile(
     selected_standard = normalize_standard(standard)
     selected_board = normalize_board(board)
     selected_state = normalize_state(state) if selected_board == "State Board" else None
-    selected_stream = normalize_stream(stream) if selected_standard in {"Standard 11", "Standard 12"} else None
-    if not selected_standard or not selected_board or (selected_board == "State Board" and not selected_state) or (selected_standard in {"Standard 11", "Standard 12"} and not selected_stream):
-        raise HTTPException(status_code=422, detail="Choose a class, board, state, and stream where required")
+    if not selected_standard or not selected_board or (selected_board == "State Board" and not selected_state):
+        raise HTTPException(status_code=422, detail="Choose a class, board, and state board state")
     with db() as connection:
         connection.execute(
-            "UPDATE users SET standard = ?, board = ?, state = ?, stream = ?, learning_profile_completed = 1 WHERE id = ?",
-            (selected_standard, selected_board, selected_state, selected_stream, user["id"]),
+            "UPDATE users SET standard = ?, board = ?, state = ?, learning_profile_completed = 1 WHERE id = ?",
+            (selected_standard, selected_board, selected_state, user["id"]),
         )
-    return {"saved": True, "standard": selected_standard, "board": selected_board, "state": selected_state, "stream": selected_stream}
+    return {"saved": True, "standard": selected_standard, "board": selected_board, "state": selected_state}
 
 
 @app.post("/api/conversations")
@@ -1587,7 +1524,7 @@ def delete_conversation(conversation_id: int, study_session: str | None = Cookie
 
 
 @app.post("/api/chat")
-def send_chat(request: Request, message: str = Form(...), subject: str = Form(""), chapter: str = Form(""), topic: str = Form(""), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
+def send_chat(request: Request, message: str = Form(...), subject: str = Form(""), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
@@ -1598,13 +1535,13 @@ def send_chat(request: Request, message: str = Form(...), subject: str = Form(""
     if len(clean_message) > MAX_MESSAGE_CHARS:
         raise HTTPException(status_code=413, detail="message_too_long")
     # Plain chatbot path: no uploaded-document context is injected.
-    response_text = ai_answer(clean_message, learning_context(user, requested_subject(clean_message, subject), chapter or None, topic or None))
+    response_text = ai_answer(clean_message, learning_context(user, requested_subject(clean_message, subject)))
     conversation_id = save_chat_turn(user["id"], clean_message, response_text, conversation_id, "general")
     return {"conversation_id": conversation_id, "messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
 
 
 @app.post("/api/chat/stream")
-def stream_chat(request: Request, message: str = Form(...), subject: str = Form(""), chapter: str = Form(""), topic: str = Form(""), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
+def stream_chat(request: Request, message: str = Form(...), subject: str = Form(""), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)
     if not user:
         api_auth_error()
@@ -1619,7 +1556,7 @@ def stream_chat(request: Request, message: str = Form(...), subject: str = Form(
     def events():
         chunks = []
         try:
-            for chunk in ai_answer_stream(clean_message, learning_context(user, requested_subject(clean_message, subject), chapter or None, topic or None)):
+            for chunk in ai_answer_stream(clean_message, learning_context(user, requested_subject(clean_message, subject))):
                 if chunk:
                     chunks.append(chunk)
                     yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
@@ -1959,41 +1896,6 @@ def admin_page(request: Request, study_session: str | None = Cookie(default=None
         users = connection.execute("SELECT id, identifier, identifier_type, created_at FROM users ORDER BY id DESC").fetchall()
         counts = connection.execute("SELECT (SELECT COUNT(*) FROM documents) documents, (SELECT COUNT(*) FROM chat_messages) messages, (SELECT COUNT(*) FROM quizzes) quizzes").fetchone()
     return templates.TemplateResponse(request, "admin/admin.html", {"user": user, "users": users, "counts": counts})
-
-
-def require_admin(study_session: str | None) -> sqlite3.Row:
-    user = current_user(study_session)
-    if not user or not user["is_admin"]:
-        raise HTTPException(status_code=403, detail="admin_required")
-    return user
-
-
-@app.get("/api/admin/curriculum")
-def admin_curriculum(review_status: str = "pending", study_session: str | None = Cookie(default=None)):
-    require_admin(study_session)
-    if review_status not in {"pending", "approved", "rejected"}:
-        raise HTTPException(status_code=400, detail="invalid_review_status")
-    with db() as connection:
-        rows = connection.execute(
-            "SELECT id, board, state, standard, stream, subject, chapter, topic, source_title, source_url, academic_year, review_status, reviewed_at FROM curriculum_chunks WHERE review_status = ? ORDER BY id DESC LIMIT 200",
-            (review_status,),
-        ).fetchall()
-    return {"chunks": [dict(row) for row in rows]}
-
-
-@app.patch("/api/admin/curriculum/{chunk_id}")
-def review_curriculum(chunk_id: int, review_status: str = Form(...), study_session: str | None = Cookie(default=None)):
-    require_admin(study_session)
-    if review_status not in {"approved", "rejected", "pending"}:
-        raise HTTPException(status_code=400, detail="invalid_review_status")
-    with db() as connection:
-        cursor = connection.execute(
-            "UPDATE curriculum_chunks SET review_status = ?, reviewed_at = ? WHERE id = ?",
-            (review_status, utc_now() if review_status != "pending" else None, chunk_id),
-        )
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="curriculum_chunk_not_found")
-    return {"updated": True, "id": chunk_id, "review_status": review_status}
 
 
 if __name__ == "__main__":

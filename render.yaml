@@ -14,8 +14,6 @@ services:
         value: "10000"
       - key: COOKIE_SECURE
         value: "1"
-      - key: ALLOWED_ORIGINS
-        sync: false
       - key: PHONE_VERIFICATION_DEV_MODE
         value: "0"
       - key: SMS_PROVIDER
