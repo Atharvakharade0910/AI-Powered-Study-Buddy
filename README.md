@@ -15,6 +15,7 @@ AI study workspace built with FastAPI. Users can ask a general teacher, upload p
 - Phone-based password recovery, account export, and confirmed account deletion
 - Sanitized upload names, a configurable 200-page PDF limit, request IDs, and duration logs
 - Optional fail-closed ClamAV scanning for uploaded PDFs
+- User-controlled long-term learner memory, scoped recent conversation memory, and adaptive next-step recommendations
 - FastAPI smoke and behavior tests
 
 ## Project structure
@@ -100,6 +101,8 @@ For browser voice security, set `ALLOWED_ORIGINS` to the exact public HTTPS orig
 To enable upload scanning, run a reachable ClamAV daemon and set `MALWARE_SCAN=clamav`, `CLAMAV_HOST`, and `CLAMAV_PORT`. The application fails the upload closed if ClamAV is unavailable or does not return an explicit clean result. The Render Blueprint leaves this disabled until a separate ClamAV service is provisioned.
 
 Signed-in learners can download `/api/export/account` from their profile. Account deletion is available at `/api/account` for API clients (DELETE with `confirm=DELETE MY ACCOUNT`) or through the profile button, and removes the user-scoped database records plus configured original PDFs from object storage.
+
+Learners can manage private long-term memory from their profile or through `/api/learning/memory`. Recent memory is limited by conversation and account; it is not shared across users. `/api/learning/recommendation` returns a small next-step suggestion based on due review cards and recent learning-event performance.
 
 Quiz answers and explanations are kept server-side until submission. The initial quiz response contains only questions and options; grading returns the correct answers and explanations after the attempt.
 

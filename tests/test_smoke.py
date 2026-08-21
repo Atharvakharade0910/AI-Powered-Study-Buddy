@@ -389,6 +389,47 @@ def test_voice_memory_is_user_scoped() -> None:
     assert "cells" not in app.voice_memory(first_id)
 
 
+def test_learner_memory_can_be_added_listed_and_deleted() -> None:
+    memory_client = TestClient(app.app)
+    register_verified(memory_client, "learner-memory@example.com", "+919876543244")
+    csrf = {"X-CSRF-Token": memory_client.cookies["csrf_token"]}
+    saved = memory_client.post("/api/learning/memory", data={"key": "Goal", "value": "Prepare for my science exam"}, headers=csrf)
+    assert saved.status_code == 200
+    assert saved.json()["memories"][0]["memory_value"] == "Prepare for my science exam"
+    listed = memory_client.get("/api/learning/memory")
+    assert listed.status_code == 200
+    assert listed.json()["memories"][0]["memory_key"] == "Goal"
+    deleted = memory_client.delete("/api/learning/memory/Goal", headers=csrf)
+    assert deleted.status_code == 200
+    assert memory_client.get("/api/learning/memory").json()["memories"] == []
+
+
+def test_general_conversations_are_created_and_deleted_user_scoped() -> None:
+    conversation_client = TestClient(app.app)
+    register_verified(conversation_client, "general-sessions@example.com", "+919876543245")
+    csrf = {"X-CSRF-Token": conversation_client.cookies["csrf_token"]}
+    created = conversation_client.post("/api/conversations", data={"title": "Physics revision", "mode": "general"}, headers=csrf)
+    assert created.status_code == 200
+    conversation_id = created.json()["conversation"]["id"]
+    listed = conversation_client.get("/api/conversations?mode=general")
+    assert any(item["id"] == conversation_id for item in listed.json()["conversations"])
+    deleted = conversation_client.delete(f"/api/conversations/{conversation_id}", headers=csrf)
+    assert deleted.status_code == 200
+    assert conversation_client.get(f"/api/chat?conversation_id={conversation_id}").status_code == 404
+
+
+def test_learning_recommendation_is_account_scoped() -> None:
+    recommendation_client = TestClient(app.app)
+    register_verified(recommendation_client, "recommendation@example.com", "+919876543246")
+    initial = recommendation_client.get("/api/learning/recommendation")
+    assert initial.status_code == 200
+    assert initial.json()["kind"] == "start"
+    with app.db() as connection:
+        user_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("recommendation@example.com",)).fetchone()["id"]
+        connection.execute("INSERT INTO learning_events (user_id, event_type, topic, score, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (user_id, "quiz", "Fractions", 25, "{}", app.utc_now()))
+    assert recommendation_client.get("/api/learning/recommendation").json()["kind"] == "practice"
+
+
 def test_mutating_api_requires_authentication() -> None:
     client.get("/api/health")
     response = client.post("/api/chat", data={"message": "hello"}, headers={"X-CSRF-Token": client.cookies["csrf_token"]})

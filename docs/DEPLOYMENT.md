@@ -25,6 +25,7 @@ For a public HTTPS deployment, copy `.env.production.example` to `.env.productio
 - Set `ALLOWED_ORIGINS` to the exact public HTTPS origin used by the browser voice client.
 - Set `MAX_UPLOAD_PAGES` to an operationally safe value; the default is 200.
 - If a ClamAV service is available, set `MALWARE_SCAN=clamav`; upload requests fail closed when the scanner is unavailable.
+- Verify learner memory endpoints and recommendation output in browser/API smoke tests after database migrations.
 
 ## Before horizontal scaling
 

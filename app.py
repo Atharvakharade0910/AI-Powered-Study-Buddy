@@ -249,6 +249,16 @@ def init_db() -> None:
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS learner_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                memory_key TEXT NOT NULL,
+                memory_value TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'learner',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, memory_key)
+            );
             """
         )
         columns = {row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
@@ -280,6 +290,7 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_learning_events_user_topic ON learning_events(user_id, topic, created_at DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_learner_memories_user ON learner_memories(user_id, updated_at DESC)")
         quiz_columns = {row[1] for row in connection.execute("PRAGMA table_info(quizzes)").fetchall()}
         for column, definition in (("topic", "TEXT NOT NULL DEFAULT 'Document study'"), ("document_id", "INTEGER")):
             if column not in quiz_columns:
@@ -516,6 +527,28 @@ def record_learning_event(user_id: int, event_type: str, topic: str, score: floa
         )
 
 
+def learner_memories(user_id: int, limit: int = 30) -> list[sqlite3.Row]:
+    with db() as connection:
+        return connection.execute(
+            "SELECT memory_key, memory_value, source, created_at, updated_at FROM learner_memories WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+            (user_id, max(1, min(limit, 50))),
+        ).fetchall()
+
+
+def learner_memory_context(user_id: int, max_chars: int = 5_000) -> str:
+    rows = learner_memories(user_id)
+    return "\n".join(f"{row['memory_key']}: {row['memory_value']}" for row in reversed(rows))[-max_chars:]
+
+
+def set_learner_memory(user_id: int, key: str, value: str, source: str = "learner") -> None:
+    now = utc_now()
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO learner_memories (user_id, memory_key, memory_value, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, memory_key) DO UPDATE SET memory_value = excluded.memory_value, source = excluded.source, updated_at = excluded.updated_at",
+            (user_id, key[:80], value[:500], source[:40], now, now),
+        )
+
+
 def user_chat(user_id: int, limit: int = MAX_CHAT_HISTORY, conversation_id: int | None = None) -> list[sqlite3.Row]:
     limit = max(1, min(int(limit), MAX_CHAT_HISTORY))
     with db() as connection:
@@ -536,7 +569,9 @@ def conversation_memory(user_id: int, conversation_id: int, limit: int = 12, max
     """Return recent turns for this user's conversation, bounded for provider context."""
     rows = user_chat(user_id, limit=limit, conversation_id=conversation_id)
     lines = [f"{row['role'].upper()}: {row['message']}" for row in rows]
-    return "\n".join(lines)[-max_chars:]
+    long_term = learner_memory_context(user_id)
+    sections = (["LONG-TERM LEARNER MEMORY:\n" + long_term] if long_term else []) + (["RECENT CONVERSATION:\n" + "\n".join(lines)] if lines else [])
+    return "\n\n".join(sections)[-max_chars:]
 
 
 def voice_memory(user_id: int, limit: int = 20, max_chars: int = 8_000) -> str:
@@ -546,7 +581,9 @@ def voice_memory(user_id: int, limit: int = 20, max_chars: int = 8_000) -> str:
             (user_id, limit),
         ).fetchall()
     lines = [f"{row['role'].upper()}: {row['message']}" for row in reversed(rows)]
-    return "\n".join(lines)[-max_chars:]
+    long_term = learner_memory_context(user_id)
+    sections = (["LONG-TERM LEARNER MEMORY:\n" + long_term] if long_term else []) + (["RECENT VOICE TRANSCRIPT:\n" + "\n".join(lines)] if lines else [])
+    return "\n\n".join(sections)[-max_chars:]
 
 
 def voice_history(user_id: int) -> list[sqlite3.Row]:
@@ -1271,6 +1308,8 @@ def update_profile(
             "UPDATE users SET full_name = ?, age_range = ?, standard = ? WHERE id = ?",
             (full_name, age_range, standard, user["id"]),
         )
+    set_learner_memory(user["id"], "standard", standard, "profile")
+    set_learner_memory(user["id"], "age range", age_range, "profile")
     return RedirectResponse("/profile?message=Profile saved", status_code=303)
 
 
@@ -1371,8 +1410,9 @@ def general_page(request: Request, study_session: str | None = Cookie(default=No
     user = current_user(study_session)
     if not user:
         return RedirectResponse("/login?error=Please+log+in+first&next=/general", status_code=303)
+    conversation = get_or_create_conversation(user["id"], mode="general")
     return templates.TemplateResponse(
-        request, "pages/general_chat.html", {"user": user, "messages": user_chat(user["id"])}
+        request, "pages/general_chat.html", {"user": user, "messages": user_chat(user["id"], conversation_id=conversation["id"]), "conversations": user_conversations(user["id"], "general"), "active_conversation_id": conversation["id"]}
     )
 
 
@@ -1433,6 +1473,65 @@ def complete_onboarding(study_session: str | None = Cookie(default=None)):
     with db() as connection:
         connection.execute("UPDATE users SET onboarding_completed = 1 WHERE id = ?", (user["id"],))
     return {"completed": True}
+
+
+@app.get("/api/learning/memory")
+def get_learning_memory(study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    return {"memories": [dict(row) for row in learner_memories(user["id"])]}
+
+
+@app.post("/api/learning/memory")
+def add_learning_memory(key: str = Form(...), value: str = Form(...), study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    clean_key, clean_value = " ".join(key.split()), " ".join(value.split())
+    if not clean_key or not clean_value:
+        raise HTTPException(status_code=400, detail="memory_required")
+    set_learner_memory(user["id"], clean_key, clean_value)
+    return {"saved": True, "memories": [dict(row) for row in learner_memories(user["id"])]}
+
+
+@app.delete("/api/learning/memory/{key}")
+def delete_learning_memory(key: str, study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    with db() as connection:
+        connection.execute("DELETE FROM learner_memories WHERE user_id = ? AND memory_key = ?", (user["id"], key))
+    return {"deleted": True}
+
+
+@app.delete("/api/learning/memory")
+def clear_learning_memory(study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    with db() as connection:
+        connection.execute("DELETE FROM learner_memories WHERE user_id = ?", (user["id"],))
+    return {"cleared": True}
+
+
+@app.get("/api/learning/recommendation")
+def learning_recommendation(study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    now = utc_now()
+    with db() as connection:
+        due = connection.execute("SELECT prompt, topic FROM review_cards WHERE user_id = ? AND due_at <= ? ORDER BY due_at LIMIT 1", (user["id"], now)).fetchone()
+        weak = connection.execute("SELECT topic, AVG(score) average_score, COUNT(*) attempts FROM learning_events WHERE user_id = ? AND score IS NOT NULL GROUP BY topic ORDER BY average_score ASC, attempts DESC LIMIT 1", (user["id"],)).fetchone()
+        messages = connection.execute("SELECT COUNT(*) count FROM chat_messages WHERE user_id = ?", (user["id"],)).fetchone()["count"]
+    if due:
+        return {"kind": "review", "title": "Revisit a weak spot", "detail": due["prompt"], "topic": due["topic"], "href": "/rag"}
+    if weak:
+        return {"kind": "practice", "title": "Practice before you move on", "detail": f"Your recent {weak['topic']} attempts average {float(weak['average_score']):.0f}%. Try one more explanation and quiz.", "topic": weak["topic"], "href": "/general"}
+    if messages == 0:
+        return {"kind": "start", "title": "Start with one question", "detail": "Ask the General Teacher about anything you are learning today.", "topic": "", "href": "/general"}
+    return {"kind": "explore", "title": "Keep your learning loop moving", "detail": "Upload notes or ask a follow-up question to deepen today’s lesson.", "topic": "", "href": "/rag"}
 
 
 @app.post("/api/conversations")
