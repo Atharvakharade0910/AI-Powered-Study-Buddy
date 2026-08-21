@@ -16,6 +16,7 @@ AI study workspace built with FastAPI. Users can ask a general teacher, upload p
 - Sanitized upload names, a configurable 200-page PDF limit, request IDs, and duration logs
 - Optional fail-closed ClamAV scanning for uploaded PDFs
 - User-controlled long-term learner memory, scoped recent conversation memory, and adaptive next-step recommendations
+- Voice lesson summaries that are saved back into the learner's private memory
 - FastAPI smoke and behavior tests
 
 ## Project structure

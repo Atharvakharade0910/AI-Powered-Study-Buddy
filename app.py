@@ -1396,6 +1396,19 @@ def get_voice_history(study_session: str | None = Cookie(default=None)):
     return {"messages": [dict(message) for message in voice_history(user["id"])]}
 
 
+@app.post("/api/voice/summary")
+def summarize_voice_lesson(study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    transcript = voice_memory(user["id"], limit=30, max_chars=10_000)
+    if not transcript.strip():
+        raise HTTPException(status_code=400, detail="voice_history_empty")
+    summary = ai_answer("Summarize this learner's voice lesson in four short bullets: topics covered, what they understood, what confused them, and the next recommended step. Do not invent anything.", context=transcript, memory=learner_memory_context(user["id"]))
+    set_learner_memory(user["id"], "last voice lesson summary", summary, "voice_summary")
+    return {"summary": summary}
+
+
 @app.delete("/api/voice/history")
 def clear_voice_history(study_session: str | None = Cookie(default=None)):
     user = current_user(study_session)

@@ -439,6 +439,19 @@ def test_explicit_conversation_statements_become_private_memory(monkeypatch) -> 
     assert any(item["memory_key"] == "difficult topic" and "fractions" in item["memory_value"] for item in memories)
 
 
+def test_voice_lesson_summary_is_saved_to_private_memory(monkeypatch) -> None:
+    summary_client = TestClient(app.app)
+    register_verified(summary_client, "voice-summary@example.com", "+919876543248")
+    with app.db() as connection:
+        user_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("voice-summary@example.com",)).fetchone()["id"]
+        connection.execute("INSERT INTO voice_messages (user_id, role, message, created_at) VALUES (?, ?, ?, ?)", (user_id, "user", "I am learning ecosystems.", app.utc_now()))
+    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="", memory="": "Topics: ecosystems\nNext: review food chains")
+    response = summary_client.post("/api/voice/summary", headers={"X-CSRF-Token": summary_client.cookies["csrf_token"]})
+    assert response.status_code == 200
+    assert "ecosystems" in response.json()["summary"]
+    assert "ecosystems" in app.learner_memory_context(user_id)
+
+
 def test_mutating_api_requires_authentication() -> None:
     client.get("/api/health")
     response = client.post("/api/chat", data={"message": "hello"}, headers={"X-CSRF-Token": client.cookies["csrf_token"]})
