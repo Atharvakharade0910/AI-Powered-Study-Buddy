@@ -346,6 +346,24 @@ def test_plain_chat_and_rag_chat_have_separate_context_paths(monkeypatch) -> Non
     assert "page 2" in calls[1][1]
 
 
+def test_general_chat_streams_tokens_and_persists(monkeypatch) -> None:
+    stream_client = TestClient(app.app)
+    register_verified(stream_client, "stream@example.com", "+919876543240")
+    monkeypatch.setattr(app, "ai_stream_answer", lambda prompt: iter(["Direct answer. ", "Simple explanation."]))
+    response = stream_client.post(
+        "/api/chat/stream",
+        data={"message": "Explain gravity"},
+        headers={"X-CSRF-Token": stream_client.cookies["csrf_token"]},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"text": "Direct answer. "' in response.text
+    assert '"type": "done"' in response.text
+    with app.db() as connection:
+        saved = connection.execute("SELECT message FROM chat_messages WHERE user_id = (SELECT id FROM users WHERE identifier = ?)", ("stream@example.com",)).fetchall()
+    assert saved[-1]["message"] == "Direct answer. Simple explanation."
+
+
 def test_mutating_api_requires_authentication() -> None:
     client.get("/api/health")
     response = client.post("/api/chat", data={"message": "hello"}, headers={"X-CSRF-Token": client.cookies["csrf_token"]})

@@ -21,7 +21,7 @@ from urllib.parse import quote_plus, urlencode
 from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Cookie, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import File, UploadFile
@@ -33,7 +33,7 @@ from malware_scanner import MalwareScanError, scan_bytes
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-from ai_provider import answer as ai_answer
+from ai_provider import answer as ai_answer, stream_answer as ai_stream_answer
 
 logger = logging.getLogger("study_buddy")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -1482,6 +1482,33 @@ def send_chat(request: Request, message: str = Form(...), conversation_id: int |
     response_text = ai_answer(clean_message)
     conversation_id = save_chat_turn(user["id"], clean_message, response_text, conversation_id, "general")
     return {"conversation_id": conversation_id, "messages": [dict(message) for message in user_chat(user["id"], conversation_id=conversation_id)]}
+
+
+@app.post("/api/chat/stream")
+def stream_chat(request: Request, message: str = Form(...), conversation_id: int | None = Form(None), study_session: str | None = Cookie(default=None)):
+    user = current_user(study_session)
+    if not user:
+        api_auth_error()
+    enforce_rate_limit(request, "chat", str(user["id"]))
+    clean_message = message.strip()
+    if not clean_message:
+        raise HTTPException(status_code=400, detail="message_required")
+    if len(clean_message) > MAX_MESSAGE_CHARS:
+        raise HTTPException(status_code=413, detail="message_too_long")
+
+    def events():
+        parts = []
+        try:
+            for delta in ai_stream_answer(clean_message):
+                parts.append(delta)
+                yield f"data: {json.dumps({'type': 'token', 'text': delta}, ensure_ascii=False)}\n\n"
+            saved_conversation_id = save_chat_turn(user["id"], clean_message, "".join(parts).strip(), conversation_id, "general")
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': saved_conversation_id})}\n\n"
+        except Exception:
+            logger.exception("Streaming chat failed for user %s", user["id"])
+            yield f"data: {json.dumps({'type': 'error', 'message': 'The teacher could not finish this answer. Please try again.'})}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/rag/chat")
