@@ -24,13 +24,18 @@ When material includes [Source: filename, page N] markers, cite the relevant sou
 If the material does not contain the answer, say so plainly."""
 
 
-def _prompt_with_context(prompt: str, context: str = "") -> str:
-    return f"<learner_material>\n{context}\n</learner_material>\n\nQuestion:\n{prompt}" if context else prompt
+def _prompt_with_context(prompt: str, context: str = "", memory: str = "") -> str:
+    sections = []
+    if memory:
+        sections.append(f"<conversation_memory>\n{memory}\n</conversation_memory>")
+    if context:
+        sections.append(f"<learner_material>\n{context}\n</learner_material>")
+    return "\n\n".join(sections) + (f"\n\nQuestion:\n{prompt}" if sections else prompt)
 
 
-def answer(prompt: str, context: str = "") -> str:
+def answer(prompt: str, context: str = "", memory: str = "") -> str:
     system = SYSTEM_PROMPT
-    prompt = _prompt_with_context(prompt, context)
+    prompt = _prompt_with_context(prompt, context, memory)
     gemini_key = os.getenv("GEMINI_API_KEY")
     if gemini_key:
         payload = json.dumps({"system_instruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1_200}}).encode()
@@ -68,9 +73,9 @@ def _sse_data(response):
             yield json.loads(value)
 
 
-def stream_answer(prompt: str, context: str = ""):
+def stream_answer(prompt: str, context: str = "", memory: str = ""):
     """Yield provider text deltas as soon as they arrive."""
-    prompt = _prompt_with_context(prompt, context)
+    prompt = _prompt_with_context(prompt, context, memory)
     gemini_key = os.getenv("GEMINI_API_KEY")
     if gemini_key:
         payload = json.dumps({"system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]}, "contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1_200}}).encode()

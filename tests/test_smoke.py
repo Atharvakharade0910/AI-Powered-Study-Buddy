@@ -167,7 +167,7 @@ def test_registration_login_and_user_isolation(monkeypatch) -> None:
     second = TestClient(app.app)
     assert register_verified(first, "first@example.com", "+919876543201").status_code == 303
     assert register_verified(second, "second@example.com", "+919876543202").status_code == 303
-    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="": "test answer")
+    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="", memory="": "test answer")
     csrf = {"X-CSRF-Token": first.cookies["csrf_token"]}
     assert first.post("/api/chat", data={"message": "first secret"}, headers=csrf).status_code == 200
     assert second.get("/api/chat").json()["messages"] == []
@@ -336,7 +336,7 @@ def test_plain_chat_and_rag_chat_have_separate_context_paths(monkeypatch) -> Non
         user_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("paths@example.com",)).fetchone()["id"]
         connection.execute("INSERT INTO documents (user_id, filename, content, created_at) VALUES (?, ?, ?, ?)", (user_id, "biology.pdf", "[Source: biology.pdf, page 2]\nMitochondria make cellular energy.", app.utc_now()))
     calls = []
-    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="": calls.append((prompt, context)) or "answer")
+    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="", memory="": calls.append((prompt, context, memory)) or "answer")
     monkeypatch.setattr(app, "semantic_scores", lambda query, chunks: [0.0] * len(chunks))
     csrf = {"X-CSRF-Token": chat_client.cookies["csrf_token"]}
     assert chat_client.post("/api/chat", data={"message": "What is energy?"}, headers=csrf).status_code == 200
@@ -349,7 +349,7 @@ def test_plain_chat_and_rag_chat_have_separate_context_paths(monkeypatch) -> Non
 def test_general_chat_streams_tokens_and_persists(monkeypatch) -> None:
     stream_client = TestClient(app.app)
     register_verified(stream_client, "stream@example.com", "+919876543240")
-    monkeypatch.setattr(app, "ai_stream_answer", lambda prompt: iter(["Direct answer. ", "Simple explanation."]))
+    monkeypatch.setattr(app, "ai_stream_answer", lambda prompt, context="", memory="": iter(["Direct answer. ", "Simple explanation."]))
     response = stream_client.post(
         "/api/chat/stream",
         data={"message": "Explain gravity"},
@@ -362,6 +362,31 @@ def test_general_chat_streams_tokens_and_persists(monkeypatch) -> None:
     with app.db() as connection:
         saved = connection.execute("SELECT message FROM chat_messages WHERE user_id = (SELECT id FROM users WHERE identifier = ?)", ("stream@example.com",)).fetchall()
     assert saved[-1]["message"] == "Direct answer. Simple explanation."
+
+
+def test_general_teacher_receives_conversation_memory(monkeypatch) -> None:
+    memory_client = TestClient(app.app)
+    register_verified(memory_client, "memory@example.com", "+919876543241")
+    memories = []
+    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="", memory="": memories.append(memory) or "Remembered answer")
+    csrf = {"X-CSRF-Token": memory_client.cookies["csrf_token"]}
+    assert memory_client.post("/api/chat", data={"message": "My project is about planets."}, headers=csrf).status_code == 200
+    assert memory_client.post("/api/chat", data={"message": "What is my project about?"}, headers=csrf).status_code == 200
+    assert "My project is about planets." in memories[-1]
+    assert "Remembered answer" in memories[-1]
+
+
+def test_voice_memory_is_user_scoped() -> None:
+    first = TestClient(app.app)
+    second = TestClient(app.app)
+    register_verified(first, "voice-memory-one@example.com", "+919876543242")
+    register_verified(second, "voice-memory-two@example.com", "+919876543243")
+    with app.db() as connection:
+        first_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("voice-memory-one@example.com",)).fetchone()["id"]
+        second_id = connection.execute("SELECT id FROM users WHERE identifier = ?", ("voice-memory-two@example.com",)).fetchone()["id"]
+        connection.executemany("INSERT INTO voice_messages (user_id, role, message, created_at) VALUES (?, ?, ?, ?)", [(first_id, "user", "I am studying planets.", app.utc_now()), (first_id, "assistant", "Let us begin with orbits.", app.utc_now()), (second_id, "user", "I am studying cells.", app.utc_now())])
+    assert "planets" in app.voice_memory(first_id)
+    assert "cells" not in app.voice_memory(first_id)
 
 
 def test_mutating_api_requires_authentication() -> None:
@@ -469,7 +494,7 @@ def test_quiz_generation_does_not_duplicate_context(monkeypatch) -> None:
     monkeypatch.setattr(app, "context_for_user", lambda user_id: "[Source: notes.pdf, page 1]\nCell theory.")
     calls = []
 
-    def fake_answer(prompt, context=""):
+    def fake_answer(prompt, context="", memory=""):
         calls.append((prompt, context))
         return json.dumps([{
             "question": "What does cell theory describe?",
@@ -554,7 +579,7 @@ def test_document_conversations_are_user_scoped_and_switchable(monkeypatch) -> N
             (conversation_id, document_id, app.utc_now()),
         )
     monkeypatch.setattr(app, "semantic_scores", lambda query, chunks: [0.0] * len(chunks))
-    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="": "grounded answer")
+    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="", memory="": "grounded answer")
     response = first.post(
         "/api/rag/chat",
         data={"message": "What do cells have?", "conversation_id": conversation_id},
