@@ -16,6 +16,12 @@ services:
         value: "1"
       - key: MAX_UPLOAD_PAGES
         value: "200"
+      - key: MALWARE_SCAN
+        value: disabled
+      - key: CLAMAV_HOST
+        sync: false
+      - key: CLAMAV_PORT
+        value: "3310"
       - key: ALLOWED_ORIGINS
         sync: false
       - key: PHONE_VERIFICATION_DEV_MODE

@@ -385,6 +385,24 @@ def test_upload_limits_and_pdf_signature() -> None:
     assert invalid.status_code == 400
 
 
+def test_upload_fails_closed_when_malware_scanner_rejects(monkeypatch) -> None:
+    register_verified(client, "scan@example.com", "+919876543239")
+    import fitz
+
+    pdf = fitz.open()
+    pdf.new_page()
+    raw = pdf.tobytes()
+    pdf.close()
+    monkeypatch.setattr(app, "scan_bytes", lambda payload: (_ for _ in ()).throw(app.MalwareScanError("blocked")))
+    response = client.post(
+        "/api/documents",
+        files={"file": ("notes.pdf", raw, "application/pdf")},
+        headers={"X-CSRF-Token": client.cookies["csrf_token"]},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "document_security_scan_failed"
+
+
 def test_document_delete_is_user_scoped() -> None:
     owner = TestClient(app.app)
     other = TestClient(app.app)

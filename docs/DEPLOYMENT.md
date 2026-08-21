@@ -24,6 +24,7 @@ For a public HTTPS deployment, copy `.env.production.example` to `.env.productio
 - Run `python -m pytest -q` before building an image.
 - Set `ALLOWED_ORIGINS` to the exact public HTTPS origin used by the browser voice client.
 - Set `MAX_UPLOAD_PAGES` to an operationally safe value; the default is 200.
+- If a ClamAV service is available, set `MALWARE_SCAN=clamav`; upload requests fail closed when the scanner is unavailable.
 
 ## Before horizontal scaling
 

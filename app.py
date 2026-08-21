@@ -28,6 +28,7 @@ from fastapi import File, UploadFile
 from dotenv import load_dotenv
 from database import PostgresConnection
 from storage import delete_pdf, put_pdf
+from malware_scanner import MalwareScanError, scan_bytes
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -1533,8 +1534,12 @@ async def upload_document(request: Request, file: UploadFile = File(...), conver
         raise
     except Exception:
         raise HTTPException(status_code=400, detail="invalid_pdf")
-    safe_filename = re.sub(r"[^A-Za-z0-9._ -]", "_", Path(file.filename).name)[:160] or "uploaded.pdf"
     loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(_document_executor, scan_bytes, raw)
+    except MalwareScanError:
+        raise HTTPException(status_code=422, detail="document_security_scan_failed")
+    safe_filename = re.sub(r"[^A-Za-z0-9._ -]", "_", Path(file.filename).name)[:160] or "uploaded.pdf"
     text = await loop.run_in_executor(_document_executor, extract_pdf_text, raw, safe_filename)
     if not text.strip():
         return {"error": "could_not_extract_text"}

@@ -14,6 +14,7 @@ AI study workspace built with FastAPI. Users can ask a general teacher, upload p
 - Upload, message, quiz, and authentication rate limits
 - Phone-based password recovery, account export, and confirmed account deletion
 - Sanitized upload names, a configurable 200-page PDF limit, request IDs, and duration logs
+- Optional fail-closed ClamAV scanning for uploaded PDFs
 - FastAPI smoke and behavior tests
 
 ## Project structure
@@ -95,6 +96,8 @@ Document study fails closed when no usable document context is available; it doe
 The Gemini Live WebSocket limits each account to one active session, validates audio payloads, caps individual audio packets, and applies a per-connection message budget. The browser surfaces provider, authentication, rate-limit, upload, and retrieval errors instead of treating non-success responses as empty results.
 
 For browser voice security, set `ALLOWED_ORIGINS` to the exact public HTTPS origin(s), comma-separated. Leaving it empty is useful for local development but allows any browser origin to attempt the WebSocket handshake; authentication and the live-session limit still apply.
+
+To enable upload scanning, run a reachable ClamAV daemon and set `MALWARE_SCAN=clamav`, `CLAMAV_HOST`, and `CLAMAV_PORT`. The application fails the upload closed if ClamAV is unavailable or does not return an explicit clean result. The Render Blueprint leaves this disabled until a separate ClamAV service is provisioned.
 
 Signed-in learners can download `/api/export/account` from their profile. Account deletion is available at `/api/account` for API clients (DELETE with `confirm=DELETE MY ACCOUNT`) or through the profile button, and removes the user-scoped database records plus configured original PDFs from object storage.
 
