@@ -501,6 +501,7 @@ def attach_legacy_documents(user_id: int, conversation_id: int) -> None:
 
 def save_chat_turn(user_id: int, user_message: str, assistant_message: str, conversation_id: int | None = None, mode: str = "general") -> int:
     conversation = get_or_create_conversation(user_id, conversation_id, mode)
+    capture_explicit_memory(user_id, user_message, f"{mode}_conversation")
     title = conversation["title"]
     if title in {"General study", "New document study"}:
         title = user_message.strip().replace("\n", " ")[:60] or title
@@ -547,6 +548,19 @@ def set_learner_memory(user_id: int, key: str, value: str, source: str = "learne
             "INSERT INTO learner_memories (user_id, memory_key, memory_value, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, memory_key) DO UPDATE SET memory_value = excluded.memory_value, source = excluded.source, updated_at = excluded.updated_at",
             (user_id, key[:80], value[:500], source[:40], now, now),
         )
+
+
+def capture_explicit_memory(user_id: int, text: str, source: str = "conversation") -> None:
+    """Capture only clearly stated goals/preferences, never arbitrary messages."""
+    clean = " ".join(text.split())
+    patterns = ((r"\bmy goal is\s+(.+)$", "learning goal"), (r"\bi am studying\s+(.+)$", "current subject"), (r"\bi'm studying\s+(.+)$", "current subject"), (r"\bi prefer\s+(.+)$", "explanation preference"), (r"\bi struggle with\s+(.+)$", "difficult topic"), (r"\bremember that\s+(.+)$", "learner note"))
+    for pattern, key in patterns:
+        match = re.search(pattern, clean, re.IGNORECASE)
+        if match:
+            value = match.group(1).strip(" .!?\n")
+            if 2 <= len(value) <= 500:
+                set_learner_memory(user_id, key, value, source)
+            break
 
 
 def user_chat(user_id: int, limit: int = MAX_CHAT_HISTORY, conversation_id: int | None = None) -> list[sqlite3.Row]:
@@ -601,6 +615,9 @@ def save_voice_turn(user_id: int, user_message: str, assistant_message: str) -> 
     if assistant_message.strip():
         rows.append((user_id, "assistant", assistant_message.strip(), utc_now()))
     if rows:
+        capture_explicit_memory(user_id, user_message, "voice_conversation")
+        if user_message.strip():
+            set_learner_memory(user_id, "last voice question", user_message.strip(), "voice_session")
         with db() as connection:
             connection.executemany(
                 "INSERT INTO voice_messages (user_id, role, message, created_at) VALUES (?, ?, ?, ?)", rows

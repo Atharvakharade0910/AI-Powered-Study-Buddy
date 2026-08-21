@@ -430,6 +430,15 @@ def test_learning_recommendation_is_account_scoped() -> None:
     assert recommendation_client.get("/api/learning/recommendation").json()["kind"] == "practice"
 
 
+def test_explicit_conversation_statements_become_private_memory(monkeypatch) -> None:
+    memory_client = TestClient(app.app)
+    register_verified(memory_client, "automatic-memory@example.com", "+919876543247")
+    monkeypatch.setattr(app, "ai_answer", lambda prompt, context="", memory="": "Noted")
+    memory_client.post("/api/chat", data={"message": "I struggle with fractions."}, headers={"X-CSRF-Token": memory_client.cookies["csrf_token"]})
+    memories = memory_client.get("/api/learning/memory").json()["memories"]
+    assert any(item["memory_key"] == "difficult topic" and "fractions" in item["memory_value"] for item in memories)
+
+
 def test_mutating_api_requires_authentication() -> None:
     client.get("/api/health")
     response = client.post("/api/chat", data={"message": "hello"}, headers={"X-CSRF-Token": client.cookies["csrf_token"]})
