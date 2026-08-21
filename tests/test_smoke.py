@@ -18,7 +18,6 @@ def register_verified(test_client: TestClient, identifier: str, phone: str) -> o
             "identifier": identifier,
             "full_name": "Test Student",
             "age_range": "16–17",
-            "standard": "Standard 9",
             "phone": phone,
             "password": "password123",
             "confirm_password": "password123",
@@ -79,14 +78,14 @@ def test_supported_standards_are_one_through_nine() -> None:
     assert app.normalize_standard("FY BSc") is None
 
 
-def test_registration_rejects_standard_ten() -> None:
+def test_registration_does_not_ask_for_standard() -> None:
+    assert 'name="standard"' not in client.get("/register").text
     response = client.post(
         "/register",
         data={
             "identifier": "older@example.com",
             "full_name": "Older Student",
             "age_range": "16–17",
-            "standard": "Standard 10",
             "phone": "+919876543299",
             "password": "password123",
             "confirm_password": "password123",
@@ -94,7 +93,7 @@ def test_registration_rejects_standard_ten() -> None:
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "Standards+1+to+9" in response.headers["location"] or "Standards%201%20to%209" in response.headers["location"]
+    assert response.headers["location"].startswith("/verify-phone?token=")
 
 
 def test_protected_pages_redirect_without_session() -> None:
@@ -183,7 +182,6 @@ def test_phone_verification_required_and_profile_persists() -> None:
             "identifier": "verified@example.com",
             "full_name": "Verified Student",
             "age_range": "16–17",
-            "standard": "Standard 8",
             "phone": "+919876543209",
             "password": "password123",
             "confirm_password": "password123",
@@ -215,7 +213,7 @@ def test_phone_verification_required_and_profile_persists() -> None:
             "SELECT full_name, age_range, standard, phone, phone_verified FROM users WHERE identifier = ?",
             ("verified@example.com",),
         ).fetchone()
-    assert tuple(user) == ("Verified Student", "16–17", "Standard 8", "+919876543209", 1)
+    assert tuple(user) == ("Verified Student", "16–17", "", "+919876543209", 1)
 
 
 def test_authenticated_pages_render_after_login() -> None:

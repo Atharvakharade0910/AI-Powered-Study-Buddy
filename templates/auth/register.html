@@ -20,7 +20,6 @@
       <div class="form-grid">
         <label>Full name<input name="full_name" autocomplete="name" placeholder="Your name" maxlength="80" required></label>
         <label>Age range<select name="age_range" required><option value="">Choose your age range</option><option>Under 13</option><option>13–15</option><option>16–17</option><option>18–24</option><option>25+</option></select></label>
-        <label>Standard<select name="standard" required><option value="">Choose your Standard</option>{% for option in ['Standard 1','Standard 2','Standard 3','Standard 4','Standard 5','Standard 6','Standard 7','Standard 8','Standard 9'] %}<option>{{ option }}</option>{% endfor %}</select><span class="field-help">This learning space is for Standards 1–9.</span></label>
         <label>Phone number<input name="phone" type="tel" autocomplete="tel" placeholder="+91 98765 43210" required><span class="field-help">Use international format; we’ll send a one-time code.</span></label>
         <label>Email or phone login<input name="identifier" autocomplete="username" placeholder="you@example.com or +91..." required></label>
         <label>Password<input type="password" name="password" autocomplete="new-password" placeholder="At least 8 characters" required></label>

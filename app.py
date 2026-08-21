@@ -939,7 +939,7 @@ def register(
     full_name: str = Form(...),
     age_range: str = Form(""),
     age: str = Form(""),
-    standard: str = Form(...),
+    standard: str = Form(""),
     phone: str = Form(...),
 ):
     enforce_rate_limit(request, "auth")
@@ -947,7 +947,6 @@ def register(
     if not normalized:
         return RedirectResponse("/register?error=Use a valid email or international phone number", status_code=303)
     full_name = " ".join(full_name.split())
-    standard = normalize_standard(standard)
     normalized_phone = normalize_phone(phone)
     if len(full_name) < 2 or len(full_name) > 80:
         return RedirectResponse("/register?error=Enter your full name", status_code=303)
@@ -960,8 +959,6 @@ def register(
             age_range = ""
     if age_range not in AGE_RANGE_OPTIONS:
         return RedirectResponse("/register?error=Choose your age range", status_code=303)
-    if not standard:
-        return RedirectResponse("/register?error=Study Buddy is currently for Standards 1 to 9", status_code=303)
     if not normalized_phone:
         return RedirectResponse("/register?error=Use a valid international phone number for verification", status_code=303)
     enforce_rate_limit(request, "auth", identity=f"registration:{normalized_phone}")
@@ -982,7 +979,8 @@ def register(
         "password_hash": hash_password(password),
         "full_name": full_name,
         "age_range": age_range,
-        "standard": standard,
+        # Standard is selected later from the profile, not during account creation.
+        "standard": "",
         "phone": normalized_phone,
     }
     challenge = create_registration_challenge(payload)
