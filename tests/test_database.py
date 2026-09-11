@@ -14,6 +14,18 @@ def test_postgres_translation_preserves_insert_conflict_semantics() -> None:
     )
 
 
+def test_postgres_translation_preserves_explicit_conflict_update() -> None:
+    statement = _translate_sql(
+        "INSERT INTO learner_memories (user_id, memory_key, memory_value) VALUES (?, ?, ?) "
+        "ON CONFLICT (user_id, memory_key) DO UPDATE SET memory_value = excluded.memory_value"
+    )
+
+    assert statement == (
+        "INSERT INTO learner_memories (user_id, memory_key, memory_value) VALUES (%s, %s, %s) "
+        "ON CONFLICT (user_id, memory_key) DO UPDATE SET memory_value = excluded.memory_value"
+    )
+
+
 def test_postgres_translation_converts_sqlite_specific_schema_expressions() -> None:
     statement = _translate_sql(
         "CREATE TABLE reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, count INTEGER "
