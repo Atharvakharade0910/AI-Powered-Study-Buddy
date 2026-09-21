@@ -15,6 +15,33 @@ class CompatRow(dict):
         return super().__getitem__(key)
 
 
+def _translate_placeholders(statement: str) -> str:
+    """Convert SQLite placeholders without altering quoted SQL content."""
+    translated: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(statement):
+        character = statement[index]
+        next_character = statement[index + 1] if index + 1 < len(statement) else ""
+        if quote:
+            translated.append(character)
+            if character == quote:
+                if next_character == quote:
+                    translated.append(next_character)
+                    index += 1
+                else:
+                    quote = None
+        elif character in {"'", '"'}:
+            quote = character
+            translated.append(character)
+        elif character == "?":
+            translated.append("%s")
+        else:
+            translated.append(character)
+        index += 1
+    return "".join(translated)
+
+
 def _translate_sql(sql: str) -> str:
     statement = sql.strip()
     pragma_match = re.fullmatch(r"PRAGMA\s+table_info\((\w+)\)", statement, flags=re.IGNORECASE)
@@ -33,7 +60,7 @@ def _translate_sql(sql: str) -> str:
     if statement.upper().startswith("INSERT INTO") and "ON CONFLICT" not in statement.upper():
         statement += " ON CONFLICT DO NOTHING"
     statement = re.sub(r"json_array_length\(questions_json\)", "jsonb_array_length(questions_json::jsonb)", statement, flags=re.IGNORECASE)
-    return statement.replace("?", "%s")
+    return _translate_placeholders(statement)
 
 
 class PostgresCursor:

@@ -41,3 +41,9 @@ def test_postgres_translation_uses_information_schema_for_table_info() -> None:
 
     assert "information_schema.columns" in statement
     assert "table_name = 'users'" in statement
+
+
+def test_postgres_translation_keeps_question_marks_in_quoted_sql_content() -> None:
+    statement = _translate_sql('SELECT \'why?\' AS prompt, "?" AS label WHERE id = ?')
+
+    assert statement == 'SELECT \'why?\' AS prompt, "?" AS label WHERE id = %s'
