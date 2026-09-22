@@ -1,6 +1,6 @@
 """Regression checks for the SQLite-to-PostgreSQL compatibility layer."""
 
-from database import _translate_sql
+from database import _split_sql_statements, _translate_sql
 
 
 def test_postgres_translation_preserves_insert_conflict_semantics() -> None:
@@ -47,3 +47,15 @@ def test_postgres_translation_keeps_question_marks_in_quoted_sql_content() -> No
     statement = _translate_sql('SELECT \'why?\' AS prompt, "?" AS label WHERE id = ?')
 
     assert statement == 'SELECT \'why?\' AS prompt, "?" AS label WHERE id = %s'
+
+
+def test_script_splitter_preserves_semicolons_in_quoted_sql_content() -> None:
+    statements = _split_sql_statements(
+        "INSERT INTO learner_memories (memory_value) VALUES ('remember; this'); "
+        'INSERT INTO labels (name) VALUES ("semi;colon");'
+    )
+
+    assert statements == [
+        "INSERT INTO learner_memories (memory_value) VALUES ('remember; this')",
+        'INSERT INTO labels (name) VALUES ("semi;colon")',
+    ]

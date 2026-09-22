@@ -42,6 +42,37 @@ def _translate_placeholders(statement: str) -> str:
     return "".join(translated)
 
 
+def _split_sql_statements(script: str) -> list[str]:
+    """Split a SQL script on statement delimiters outside quoted content."""
+    statements: list[str] = []
+    statement: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(script):
+        character = script[index]
+        next_character = script[index + 1] if index + 1 < len(script) else ""
+        statement.append(character)
+        if quote:
+            if character == quote:
+                if next_character == quote:
+                    statement.append(next_character)
+                    index += 1
+                else:
+                    quote = None
+        elif character in {"'", '"'}:
+            quote = character
+        elif character == ";":
+            completed_statement = "".join(statement[:-1]).strip()
+            if completed_statement:
+                statements.append(completed_statement)
+            statement = []
+        index += 1
+    final_statement = "".join(statement).strip()
+    if final_statement:
+        statements.append(final_statement)
+    return statements
+
+
 def _translate_sql(sql: str) -> str:
     statement = sql.strip()
     pragma_match = re.fullmatch(r"PRAGMA\s+table_info\((\w+)\)", statement, flags=re.IGNORECASE)
@@ -115,9 +146,8 @@ class PostgresConnection:
         return PostgresCursor(self, cursor, translated.upper().startswith("INSERT INTO"))
 
     def executescript(self, script: str) -> None:
-        for statement in script.split(";"):
-            if statement.strip():
-                self.execute(statement)
+        for statement in _split_sql_statements(script):
+            self.execute(statement)
 
     def __enter__(self) -> "PostgresConnection":
         return self
