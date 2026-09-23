@@ -43,16 +43,26 @@ def _translate_placeholders(statement: str) -> str:
 
 
 def _split_sql_statements(script: str) -> list[str]:
-    """Split a SQL script on statement delimiters outside quoted content."""
+    """Split a SQL script on statement delimiters outside quoted or commented content."""
     statements: list[str] = []
     statement: list[str] = []
     index = 0
     quote: str | None = None
+    line_comment = False
+    block_comment = False
     while index < len(script):
         character = script[index]
         next_character = script[index + 1] if index + 1 < len(script) else ""
         statement.append(character)
-        if quote:
+        if line_comment:
+            if character in {"\n", "\r"}:
+                line_comment = False
+        elif block_comment:
+            if character == "*" and next_character == "/":
+                statement.append(next_character)
+                index += 1
+                block_comment = False
+        elif quote:
             if character == quote:
                 if next_character == quote:
                     statement.append(next_character)
@@ -61,6 +71,14 @@ def _split_sql_statements(script: str) -> list[str]:
                     quote = None
         elif character in {"'", '"'}:
             quote = character
+        elif character == "-" and next_character == "-":
+            statement.append(next_character)
+            index += 1
+            line_comment = True
+        elif character == "/" and next_character == "*":
+            statement.append(next_character)
+            index += 1
+            block_comment = True
         elif character == ";":
             completed_statement = "".join(statement[:-1]).strip()
             if completed_statement:

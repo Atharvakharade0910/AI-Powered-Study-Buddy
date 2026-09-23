@@ -59,3 +59,17 @@ def test_script_splitter_preserves_semicolons_in_quoted_sql_content() -> None:
         "INSERT INTO learner_memories (memory_value) VALUES ('remember; this')",
         'INSERT INTO labels (name) VALUES ("semi;colon")',
     ]
+
+
+def test_script_splitter_preserves_semicolons_in_sql_comments() -> None:
+    statements = _split_sql_statements(
+        "-- migration note; still the same statement\n"
+        "CREATE TABLE labels (id INTEGER); "
+        "/* a block comment; with a delimiter */ "
+        "INSERT INTO labels (id) VALUES (1);"
+    )
+
+    assert statements == [
+        "-- migration note; still the same statement\nCREATE TABLE labels (id INTEGER)",
+        "/* a block comment; with a delimiter */ INSERT INTO labels (id) VALUES (1)",
+    ]
