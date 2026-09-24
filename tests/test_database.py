@@ -73,3 +73,23 @@ def test_script_splitter_preserves_semicolons_in_sql_comments() -> None:
         "-- migration note; still the same statement\nCREATE TABLE labels (id INTEGER)",
         "/* a block comment; with a delimiter */ INSERT INTO labels (id) VALUES (1)",
     ]
+
+
+def test_script_splitter_preserves_semicolons_in_postgres_dollar_quoted_content() -> None:
+    statements = _split_sql_statements(
+        "CREATE FUNCTION welcome() RETURNS text AS $body$\n"
+        "BEGIN\n"
+        "  RETURN 'hello; learner';\n"
+        "END;\n"
+        "$body$ LANGUAGE plpgsql;\n"
+        "INSERT INTO labels (name) VALUES ('daily review');"
+    )
+
+    assert statements == [
+        "CREATE FUNCTION welcome() RETURNS text AS $body$\n"
+        "BEGIN\n"
+        "  RETURN 'hello; learner';\n"
+        "END;\n"
+        "$body$ LANGUAGE plpgsql",
+        "INSERT INTO labels (name) VALUES ('daily review')",
+    ]
