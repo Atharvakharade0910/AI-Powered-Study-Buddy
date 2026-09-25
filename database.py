@@ -16,14 +16,34 @@ class CompatRow(dict):
 
 
 def _translate_placeholders(statement: str) -> str:
-    """Convert SQLite placeholders without altering quoted SQL content."""
+    """Convert SQLite placeholders without altering SQL literals or comments."""
     translated: list[str] = []
     index = 0
     quote: str | None = None
+    dollar_quote: str | None = None
+    line_comment = False
+    block_comment = False
     while index < len(statement):
         character = statement[index]
         next_character = statement[index + 1] if index + 1 < len(statement) else ""
-        if quote:
+        if dollar_quote:
+            if statement.startswith(dollar_quote, index):
+                translated.append(dollar_quote)
+                index += len(dollar_quote)
+                dollar_quote = None
+                continue
+            translated.append(character)
+        elif line_comment:
+            translated.append(character)
+            if character in {"\n", "\r"}:
+                line_comment = False
+        elif block_comment:
+            translated.append(character)
+            if character == "*" and next_character == "/":
+                translated.append(next_character)
+                index += 1
+                block_comment = False
+        elif quote:
             translated.append(character)
             if character == quote:
                 if next_character == quote:
@@ -34,6 +54,22 @@ def _translate_placeholders(statement: str) -> str:
         elif character in {"'", '"'}:
             quote = character
             translated.append(character)
+        elif character == "$":
+            delimiter_match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", statement[index:])
+            if delimiter_match:
+                dollar_quote = delimiter_match.group(0)
+                translated.append(dollar_quote)
+                index += len(dollar_quote)
+                continue
+            translated.append(character)
+        elif character == "-" and next_character == "-":
+            translated.extend((character, next_character))
+            index += 1
+            line_comment = True
+        elif character == "/" and next_character == "*":
+            translated.extend((character, next_character))
+            index += 1
+            block_comment = True
         elif character == "?":
             translated.append("%s")
         else:

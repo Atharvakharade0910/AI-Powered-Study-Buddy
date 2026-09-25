@@ -49,6 +49,18 @@ def test_postgres_translation_keeps_question_marks_in_quoted_sql_content() -> No
     assert statement == 'SELECT \'why?\' AS prompt, "?" AS label WHERE id = %s'
 
 
+def test_postgres_translation_keeps_question_marks_in_comments_and_dollar_quotes() -> None:
+    statement = _translate_sql(
+        "SELECT $hint$why?$hint$ AS note, ? AS learner_id -- question?\n"
+        "/* another ? */ WHERE active = ?"
+    )
+
+    assert statement == (
+        "SELECT $hint$why?$hint$ AS note, %s AS learner_id -- question?\n"
+        "/* another ? */ WHERE active = %s"
+    )
+
+
 def test_script_splitter_preserves_semicolons_in_quoted_sql_content() -> None:
     statements = _split_sql_statements(
         "INSERT INTO learner_memories (memory_value) VALUES ('remember; this'); "
