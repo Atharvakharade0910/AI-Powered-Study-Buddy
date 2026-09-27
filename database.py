@@ -22,7 +22,7 @@ def _translate_placeholders(statement: str) -> str:
     quote: str | None = None
     dollar_quote: str | None = None
     line_comment = False
-    block_comment = False
+    block_comment_depth = 0
     while index < len(statement):
         character = statement[index]
         next_character = statement[index + 1] if index + 1 < len(statement) else ""
@@ -37,12 +37,16 @@ def _translate_placeholders(statement: str) -> str:
             translated.append(character)
             if character in {"\n", "\r"}:
                 line_comment = False
-        elif block_comment:
+        elif block_comment_depth:
             translated.append(character)
-            if character == "*" and next_character == "/":
+            if character == "/" and next_character == "*":
                 translated.append(next_character)
                 index += 1
-                block_comment = False
+                block_comment_depth += 1
+            elif character == "*" and next_character == "/":
+                translated.append(next_character)
+                index += 1
+                block_comment_depth -= 1
         elif quote:
             translated.append(character)
             if character == quote:
@@ -69,7 +73,7 @@ def _translate_placeholders(statement: str) -> str:
         elif character == "/" and next_character == "*":
             translated.extend((character, next_character))
             index += 1
-            block_comment = True
+            block_comment_depth = 1
         elif character == "?":
             translated.append("%s")
         else:
@@ -86,7 +90,7 @@ def _split_sql_statements(script: str) -> list[str]:
     quote: str | None = None
     dollar_quote: str | None = None
     line_comment = False
-    block_comment = False
+    block_comment_depth = 0
     while index < len(script):
         character = script[index]
         next_character = script[index + 1] if index + 1 < len(script) else ""
@@ -99,11 +103,15 @@ def _split_sql_statements(script: str) -> list[str]:
         elif line_comment:
             if character in {"\n", "\r"}:
                 line_comment = False
-        elif block_comment:
-            if character == "*" and next_character == "/":
+        elif block_comment_depth:
+            if character == "/" and next_character == "*":
                 statement.append(next_character)
                 index += 1
-                block_comment = False
+                block_comment_depth += 1
+            elif character == "*" and next_character == "/":
+                statement.append(next_character)
+                index += 1
+                block_comment_depth -= 1
         elif quote:
             if character == quote:
                 if next_character == quote:
@@ -126,7 +134,7 @@ def _split_sql_statements(script: str) -> list[str]:
         elif character == "/" and next_character == "*":
             statement.append(next_character)
             index += 1
-            block_comment = True
+            block_comment_depth = 1
         elif character == ";":
             completed_statement = "".join(statement[:-1]).strip()
             if completed_statement:

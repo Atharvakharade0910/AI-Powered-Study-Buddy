@@ -61,6 +61,12 @@ def test_postgres_translation_keeps_question_marks_in_comments_and_dollar_quotes
     )
 
 
+def test_postgres_translation_keeps_question_marks_in_nested_block_comments() -> None:
+    statement = _translate_sql("SELECT ? /* outer ? /* inner ? */ still outer ? */ WHERE active = ?")
+
+    assert statement == "SELECT %s /* outer ? /* inner ? */ still outer ? */ WHERE active = %s"
+
+
 def test_script_splitter_preserves_semicolons_in_quoted_sql_content() -> None:
     statements = _split_sql_statements(
         "INSERT INTO learner_memories (memory_value) VALUES ('remember; this'); "
@@ -84,6 +90,18 @@ def test_script_splitter_preserves_semicolons_in_sql_comments() -> None:
     assert statements == [
         "-- migration note; still the same statement\nCREATE TABLE labels (id INTEGER)",
         "/* a block comment; with a delimiter */ INSERT INTO labels (id) VALUES (1)",
+    ]
+
+
+def test_script_splitter_preserves_semicolons_in_nested_block_comments() -> None:
+    statements = _split_sql_statements(
+        "/* outer; /* inner; */ still outer; */ CREATE TABLE labels (id INTEGER); "
+        "INSERT INTO labels (id) VALUES (1);"
+    )
+
+    assert statements == [
+        "/* outer; /* inner; */ still outer; */ CREATE TABLE labels (id INTEGER)",
+        "INSERT INTO labels (id) VALUES (1)",
     ]
 
 
