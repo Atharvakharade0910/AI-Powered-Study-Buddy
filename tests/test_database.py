@@ -49,6 +49,12 @@ def test_postgres_translation_keeps_question_marks_in_quoted_sql_content() -> No
     assert statement == 'SELECT \'why?\' AS prompt, "?" AS label WHERE id = %s'
 
 
+def test_postgres_translation_preserves_question_marks_in_escape_strings() -> None:
+    statement = _translate_sql(r"SELECT E'learner\'s question?' AS prompt WHERE id = ?")
+
+    assert statement == r"SELECT E'learner\'s question?' AS prompt WHERE id = %s"
+
+
 def test_postgres_translation_keeps_question_marks_in_comments_and_dollar_quotes() -> None:
     statement = _translate_sql(
         "SELECT $hint$why?$hint$ AS note, ? AS learner_id -- question?\n"
@@ -76,6 +82,18 @@ def test_script_splitter_preserves_semicolons_in_quoted_sql_content() -> None:
     assert statements == [
         "INSERT INTO learner_memories (memory_value) VALUES ('remember; this')",
         'INSERT INTO labels (name) VALUES ("semi;colon")',
+    ]
+
+
+def test_script_splitter_preserves_semicolons_in_escape_strings() -> None:
+    statements = _split_sql_statements(
+        r"INSERT INTO learner_memories (memory_value) VALUES (E'learner\'s note; keep it'); "
+        "INSERT INTO labels (name) VALUES ('daily review');"
+    )
+
+    assert statements == [
+        r"INSERT INTO learner_memories (memory_value) VALUES (E'learner\'s note; keep it')",
+        "INSERT INTO labels (name) VALUES ('daily review')",
     ]
 
 

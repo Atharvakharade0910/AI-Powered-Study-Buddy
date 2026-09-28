@@ -20,6 +20,7 @@ def _translate_placeholders(statement: str) -> str:
     translated: list[str] = []
     index = 0
     quote: str | None = None
+    backslash_escapes = False
     dollar_quote: str | None = None
     line_comment = False
     block_comment_depth = 0
@@ -49,14 +50,24 @@ def _translate_placeholders(statement: str) -> str:
                 block_comment_depth -= 1
         elif quote:
             translated.append(character)
-            if character == quote:
+            if backslash_escapes and character == "\\" and next_character:
+                translated.append(next_character)
+                index += 1
+            elif character == quote:
                 if next_character == quote:
                     translated.append(next_character)
                     index += 1
                 else:
                     quote = None
+                    backslash_escapes = False
         elif character in {"'", '"'}:
             quote = character
+            backslash_escapes = (
+                quote == "'"
+                and index > 0
+                and statement[index - 1] in {"E", "e"}
+                and (index == 1 or not (statement[index - 2].isalnum() or statement[index - 2] == "_"))
+            )
             translated.append(character)
         elif character == "$":
             delimiter_match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", statement[index:])
@@ -88,6 +99,7 @@ def _split_sql_statements(script: str) -> list[str]:
     statement: list[str] = []
     index = 0
     quote: str | None = None
+    backslash_escapes = False
     dollar_quote: str | None = None
     line_comment = False
     block_comment_depth = 0
@@ -113,14 +125,24 @@ def _split_sql_statements(script: str) -> list[str]:
                 index += 1
                 block_comment_depth -= 1
         elif quote:
-            if character == quote:
+            if backslash_escapes and character == "\\" and next_character:
+                statement.append(next_character)
+                index += 1
+            elif character == quote:
                 if next_character == quote:
                     statement.append(next_character)
                     index += 1
                 else:
                     quote = None
+                    backslash_escapes = False
         elif character in {"'", '"'}:
             quote = character
+            backslash_escapes = (
+                quote == "'"
+                and index > 0
+                and script[index - 1] in {"E", "e"}
+                and (index == 1 or not (script[index - 2].isalnum() or script[index - 2] == "_"))
+            )
         elif character == "$":
             delimiter_match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", script[index:])
             if delimiter_match:
