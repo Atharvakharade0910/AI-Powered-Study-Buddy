@@ -202,7 +202,7 @@ class PostgresCursor:
 
     @property
     def lastrowid(self) -> int | None:
-        if not self.insert_statement:
+        if not self.insert_statement or self.cursor.rowcount == 0:
             return None
         row = self.connection.execute("SELECT lastval() AS id").fetchone()
         return row["id"] if row else None

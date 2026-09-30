@@ -1,6 +1,21 @@
 """Regression checks for the SQLite-to-PostgreSQL compatibility layer."""
 
-from database import _split_sql_statements, _translate_sql
+from database import PostgresCursor, _split_sql_statements, _translate_sql
+
+
+class _SkippedInsertCursor:
+    rowcount = 0
+
+
+class _ConnectionThatMustNotReadLastValue:
+    def execute(self, sql: str) -> None:
+        raise AssertionError(f"Skipped inserts must not query lastval(): {sql}")
+
+
+def test_postgres_cursor_has_no_lastrowid_when_insert_is_skipped() -> None:
+    cursor = PostgresCursor(_ConnectionThatMustNotReadLastValue(), _SkippedInsertCursor(), insert_statement=True)
+
+    assert cursor.lastrowid is None
 
 
 def test_postgres_translation_preserves_insert_conflict_semantics() -> None:
