@@ -169,6 +169,75 @@ def _split_sql_statements(script: str) -> list[str]:
     return statements
 
 
+def _conflict_clause_info(statement: str) -> tuple[bool, bool]:
+    """Return whether executable SQL has ``ON CONFLICT`` and ends in a line comment."""
+    index = 0
+    quote: str | None = None
+    backslash_escapes = False
+    dollar_quote: str | None = None
+    line_comment = False
+    block_comment_depth = 0
+    executable: list[str] = []
+    while index < len(statement):
+        character = statement[index]
+        next_character = statement[index + 1] if index + 1 < len(statement) else ""
+        if dollar_quote:
+            if statement.startswith(dollar_quote, index):
+                index += len(dollar_quote)
+                dollar_quote = None
+                executable.append(" ")
+                continue
+        elif line_comment:
+            if character in {"\n", "\r"}:
+                line_comment = False
+                executable.append(" ")
+        elif block_comment_depth:
+            if character == "/" and next_character == "*":
+                index += 1
+                block_comment_depth += 1
+            elif character == "*" and next_character == "/":
+                index += 1
+                block_comment_depth -= 1
+        elif quote:
+            if backslash_escapes and character == "\\" and next_character:
+                index += 1
+            elif character == quote:
+                if next_character == quote:
+                    index += 1
+                else:
+                    quote = None
+                    backslash_escapes = False
+        elif character in {"'", '"'}:
+            quote = character
+            backslash_escapes = (
+                quote == "'"
+                and index > 0
+                and statement[index - 1] in {"E", "e"}
+                and (index == 1 or not (statement[index - 2].isalnum() or statement[index - 2] == "_"))
+            )
+        elif character == "$":
+            delimiter_match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", statement[index:])
+            if delimiter_match:
+                dollar_quote = delimiter_match.group(0)
+                index += len(dollar_quote)
+                executable.append(" ")
+                continue
+            executable.append(character)
+        elif character == "-" and next_character == "-":
+            index += 1
+            line_comment = True
+        elif character == "/" and next_character == "*":
+            index += 1
+            block_comment_depth = 1
+        else:
+            executable.append(character)
+        index += 1
+    return (
+        bool(re.search(r"\bON\s+CONFLICT\b", "".join(executable), flags=re.IGNORECASE)),
+        line_comment,
+    )
+
+
 def _translate_sql(sql: str) -> str:
     statement = sql.strip()
     pragma_match = re.fullmatch(r"PRAGMA\s+table_info\((\w+)\)", statement, flags=re.IGNORECASE)
@@ -184,8 +253,10 @@ def _translate_sql(sql: str) -> str:
         return "SELECT 1"
     statement = re.sub(r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", "BIGSERIAL PRIMARY KEY", statement, flags=re.IGNORECASE)
     statement = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", statement, flags=re.IGNORECASE)
-    if statement.upper().startswith("INSERT INTO") and "ON CONFLICT" not in statement.upper():
-        statement += " ON CONFLICT DO NOTHING"
+    has_conflict_clause, ends_in_line_comment = _conflict_clause_info(statement)
+    if statement.upper().startswith("INSERT INTO") and not has_conflict_clause:
+        statement += "\n" if ends_in_line_comment else " "
+        statement += "ON CONFLICT DO NOTHING"
     statement = re.sub(r"json_array_length\(questions_json\)", "jsonb_array_length(questions_json::jsonb)", statement, flags=re.IGNORECASE)
     return _translate_placeholders(statement)
 
