@@ -52,6 +52,16 @@ def test_postgres_translation_ignores_conflict_words_in_literals_and_comments() 
     )
 
 
+def test_postgres_translation_preserves_conflict_clause_separated_by_block_comment() -> None:
+    statement = _translate_sql(
+        "INSERT INTO learner_memories (memory_value) VALUES (?) ON/* migration note */CONFLICT DO NOTHING"
+    )
+
+    assert statement == (
+        "INSERT INTO learner_memories (memory_value) VALUES (%s) ON/* migration note */CONFLICT DO NOTHING"
+    )
+
+
 def test_postgres_translation_converts_sqlite_specific_schema_expressions() -> None:
     statement = _translate_sql(
         "CREATE TABLE reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, count INTEGER "

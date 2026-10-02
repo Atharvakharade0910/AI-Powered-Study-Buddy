@@ -229,6 +229,7 @@ def _conflict_clause_info(statement: str) -> tuple[bool, bool]:
         elif character == "/" and next_character == "*":
             index += 1
             block_comment_depth = 1
+            executable.append(" ")
         else:
             executable.append(character)
         index += 1
