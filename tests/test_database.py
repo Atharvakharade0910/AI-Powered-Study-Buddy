@@ -72,6 +72,20 @@ def test_postgres_translation_converts_sqlite_specific_schema_expressions() -> N
     assert "jsonb_array_length(questions_json::jsonb)" in statement
 
 
+def test_postgres_translation_preserves_json_function_words_in_non_executable_sql() -> None:
+    statement = _translate_sql(
+        "SELECT 'json_array_length(questions_json)' AS lesson_note, "
+        "json_array_length(questions_json) AS question_count -- json_array_length(questions_json)\n"
+        "FROM quizzes"
+    )
+
+    assert statement == (
+        "SELECT 'json_array_length(questions_json)' AS lesson_note, "
+        "jsonb_array_length(questions_json::jsonb) AS question_count -- json_array_length(questions_json)\n"
+        "FROM quizzes"
+    )
+
+
 def test_postgres_translation_uses_information_schema_for_table_info() -> None:
     statement = _translate_sql("PRAGMA table_info(users)")
 

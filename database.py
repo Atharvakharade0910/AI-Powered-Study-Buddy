@@ -239,6 +239,87 @@ def _conflict_clause_info(statement: str) -> tuple[bool, bool]:
     )
 
 
+def _translate_json_array_length(statement: str) -> str:
+    """Translate the SQLite JSON helper only when it appears in executable SQL."""
+    translated: list[str] = []
+    index = 0
+    quote: str | None = None
+    backslash_escapes = False
+    dollar_quote: str | None = None
+    line_comment = False
+    block_comment_depth = 0
+    sqlite_function = "json_array_length(questions_json)"
+    postgres_function = "jsonb_array_length(questions_json::jsonb)"
+    while index < len(statement):
+        character = statement[index]
+        next_character = statement[index + 1] if index + 1 < len(statement) else ""
+        if dollar_quote:
+            if statement.startswith(dollar_quote, index):
+                translated.append(dollar_quote)
+                index += len(dollar_quote)
+                dollar_quote = None
+                continue
+            translated.append(character)
+        elif line_comment:
+            translated.append(character)
+            if character in {"\n", "\r"}:
+                line_comment = False
+        elif block_comment_depth:
+            translated.append(character)
+            if character == "/" and next_character == "*":
+                translated.append(next_character)
+                index += 1
+                block_comment_depth += 1
+            elif character == "*" and next_character == "/":
+                translated.append(next_character)
+                index += 1
+                block_comment_depth -= 1
+        elif quote:
+            translated.append(character)
+            if backslash_escapes and character == "\\" and next_character:
+                translated.append(next_character)
+                index += 1
+            elif character == quote:
+                if next_character == quote:
+                    translated.append(next_character)
+                    index += 1
+                else:
+                    quote = None
+                    backslash_escapes = False
+        elif character in {"'", '"'}:
+            quote = character
+            backslash_escapes = (
+                quote == "'"
+                and index > 0
+                and statement[index - 1] in {"E", "e"}
+                and (index == 1 or not (statement[index - 2].isalnum() or statement[index - 2] == "_"))
+            )
+            translated.append(character)
+        elif character == "$":
+            delimiter_match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", statement[index:])
+            if delimiter_match:
+                dollar_quote = delimiter_match.group(0)
+                translated.append(dollar_quote)
+                index += len(dollar_quote)
+                continue
+            translated.append(character)
+        elif character == "-" and next_character == "-":
+            translated.extend((character, next_character))
+            index += 1
+            line_comment = True
+        elif character == "/" and next_character == "*":
+            translated.extend((character, next_character))
+            index += 1
+            block_comment_depth = 1
+        elif statement[index : index + len(sqlite_function)].lower() == sqlite_function:
+            translated.append(postgres_function)
+            index += len(sqlite_function) - 1
+        else:
+            translated.append(character)
+        index += 1
+    return "".join(translated)
+
+
 def _translate_sql(sql: str) -> str:
     statement = sql.strip()
     pragma_match = re.fullmatch(r"PRAGMA\s+table_info\((\w+)\)", statement, flags=re.IGNORECASE)
@@ -258,7 +339,7 @@ def _translate_sql(sql: str) -> str:
     if statement.upper().startswith("INSERT INTO") and not has_conflict_clause:
         statement += "\n" if ends_in_line_comment else " "
         statement += "ON CONFLICT DO NOTHING"
-    statement = re.sub(r"json_array_length\(questions_json\)", "jsonb_array_length(questions_json::jsonb)", statement, flags=re.IGNORECASE)
+    statement = _translate_json_array_length(statement)
     return _translate_placeholders(statement)
 
 
