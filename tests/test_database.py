@@ -86,6 +86,18 @@ def test_postgres_translation_preserves_json_function_words_in_non_executable_sq
     )
 
 
+def test_postgres_translation_preserves_identifiers_ending_with_json_array_length() -> None:
+    statement = _translate_sql(
+        "SELECT learner_json_array_length(questions_json) AS custom_count, "
+        "json_array_length(questions_json) AS question_count FROM quizzes"
+    )
+
+    assert statement == (
+        "SELECT learner_json_array_length(questions_json) AS custom_count, "
+        "jsonb_array_length(questions_json::jsonb) AS question_count FROM quizzes"
+    )
+
+
 def test_postgres_translation_uses_information_schema_for_table_info() -> None:
     statement = _translate_sql("PRAGMA table_info(users)")
 

@@ -311,7 +311,10 @@ def _translate_json_array_length(statement: str) -> str:
             translated.extend((character, next_character))
             index += 1
             block_comment_depth = 1
-        elif statement[index : index + len(sqlite_function)].lower() == sqlite_function:
+        elif (
+            statement[index : index + len(sqlite_function)].lower() == sqlite_function
+            and (index == 0 or not (statement[index - 1].isalnum() or statement[index - 1] == "_"))
+        ):
             translated.append(postgres_function)
             index += len(sqlite_function) - 1
         else:
